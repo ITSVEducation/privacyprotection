@@ -1,7 +1,13 @@
+import ctypes
+import subprocess
+
 from privacyprotection.handlers.folder_walker import walk
 from privacyprotection.handlers.registry import get_handler
 from privacyprotection.handlers.text_handler import TextHandler
 from privacyprotection.handlers.xlsx_handler import XlsxHandler
+
+_FILE_ATTRIBUTE_HIDDEN = 0x2
+_FILE_ATTRIBUTE_SYSTEM = 0x4
 
 
 def test_registry_resolves_by_extension(tmp_path):
@@ -25,3 +31,47 @@ def test_walk_collects_supported_and_skips(tmp_path):
     skipped_names = {p.name for p, _ in r.skipped}
     assert "c.pdf" in skipped_names
     assert "~$lock.docx" in skipped_names
+
+
+def test_walk_skips_windows_hidden_and_system_file(tmp_path):
+    # ファイル名は Unix 風の "." 始まりではない、ごく普通の名前。
+    # Windows の隠し属性・システム属性（attrib +h +s / エクスプローラの「隠しファイル」）
+    # のみで隠された実際のケースを再現する。
+    target = tmp_path / "normal.txt"
+    target.write_text("secret")
+    ok = ctypes.windll.kernel32.SetFileAttributesW(
+        str(target), _FILE_ATTRIBUTE_HIDDEN | _FILE_ATTRIBUTE_SYSTEM
+    )
+    assert ok, "SetFileAttributesW failed to set hidden/system attributes"
+
+    r = walk(tmp_path)
+
+    supported_names = {p.name for p in r.supported}
+    assert "normal.txt" not in supported_names
+    skipped_names = {p.name for p, _ in r.skipped}
+    assert "normal.txt" in skipped_names
+
+
+def test_walk_does_not_follow_ntfs_junction(tmp_path):
+    # NTFS ジャンクションは IO_REPARSE_TAG_MOUNT_POINT を使い、シンボリックリンクとは
+    # 別のタグのため Path.is_symlink() や os.walk(followlinks=False) では検出できない。
+    # os.symlink() では真のジャンクションを再現できないため mklink /J で実際に作成する。
+    real_target = tmp_path / "real_target"
+    real_target.mkdir()
+    (real_target / "inside.txt").write_text("x")
+
+    junction = tmp_path / "junction_link"
+    proc = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(real_target)],
+        capture_output=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    r = walk(tmp_path)
+
+    # inside.txt は real_target 経由で1回だけ見えるべきで、junction 経由で二重に
+    # 列挙されたり、循環構造で無限ループに陥ったりしてはならない。
+    supported_names = sorted(p.name for p in r.supported)
+    assert supported_names == ["inside.txt"]
+    (only_hit,) = [p for p in r.supported if p.name == "inside.txt"]
+    assert junction not in only_hit.parents
