@@ -33,15 +33,47 @@ def test_digits_inside_longer_number_not_matched():
     # 20桁の連番はクレカ(16桁)として部分マッチしない
     assert all(c != "CREDITCARD" for _, c in cats("12345678901234567890"))
 
-def test_delimited_run_one_digit_longer_not_matched_as_creditcard_or_mynumber():
-    # 上のテストは区切り文字(-や空白)が一切ない20桁連続なので、CREDITCARD/MYNUMBER
-    # が要求する区切り文字自体が存在せず、(?<!\d)/(?!\d) の境界ガードは実質検証
-    # されない（ガードを外しても同じ結果になる）。区切りを挟みつつ正規の16桁/12桁
-    # より1桁多い並びで、境界ガードが誤検出を正しく防ぐことを検証する。
-    # ("1234-5678-9012-3456-7" は正規の16桁カードの後ろにさらに1桁が区切り付きで
-    #  続く形、"01234-5678-9012-3456" は先頭の4桁グループに1桁がくっついた形。)
-    assert cats("1234-5678-9012-3456-7") == []
-    assert all(c not in ("CREDITCARD", "MYNUMBER") for _, c in cats("01234-5678-9012-3456"))
+def test_leading_glued_digit_blocks_creditcard_false_match():
+    # CREDITCARDの境界ガードは (?<!\d) の1文字後読みのみで十分: 「01234-5678-9012-3456」
+    # で「1234-5678-9012-3456」(index1開始)が誤って16桁カードとして検出されないのは、
+    # 直前の文字(index0の"0")が数字であるため。区切り文字越しに2文字分先読み・後読み
+    # する (?<!\d[- ]) / (?![- ]\d) のような拡張ガードは不要（一度導入されたが、
+    # 正規の16桁カード自体を検出できなくするregressionだとレビューで判明し差し戻し
+    # 済み。詳細は patterns.py 冒頭のコメント、および
+    # test_creditcard_not_over_blocked_by_adjacent_digit_across_separator を参照）。
+    assert all(c != "CREDITCARD" for _, c in cats("01234-5678-9012-3456"))
+
+
+def test_creditcard_not_over_blocked_by_adjacent_digit_across_separator():
+    # regression再発防止: 区切り文字を挟んで隣接する無関係な数字（別文脈の数字、
+    # 箇条書き番号など）があっても、正規に区切られた16桁カード番号自体は
+    # 引き続き検出されなければならない。1文字ガードから2文字ガードへ広げた
+    # commit 756e712 は、これらすべてを検出漏れにする regression だった。
+    for text in (
+        "5 1234-5678-9012-3456",
+        "1234-5678-9012-3456 7",
+        "5-1234-5678-9012-3456",
+    ):
+        results = det.detect(text)
+        assert ("1234-5678-9012-3456", "CREDITCARD") in {
+            (d.text, d.category) for d in results
+        }
+        for d in results:
+            assert text[d.start:d.end] == d.text
+
+
+def test_mynumber_not_over_blocked_by_adjacent_digit_across_separator():
+    # 上と同じ regression の MYNUMBER (12桁) 版。
+    for text in (
+        "5 1234 5678 9012",
+        "1234 5678 9012 7",
+    ):
+        results = det.detect(text)
+        assert ("1234 5678 9012", "MYNUMBER") in {
+            (d.text, d.category) for d in results
+        }
+        for d in results:
+            assert text[d.start:d.end] == d.text
 
 def test_overlapping_candidate_is_trimmed_not_discarded():
     # 再現ケース: ADDRESSの生マッチ範囲(0,26)はPHONEの範囲(14,26)と部分的に重なる
@@ -78,13 +110,27 @@ def test_overlap_in_middle_splits_candidate_into_two_segments():
         assert text[d.start:d.end] == d.text
 
 def test_full_overlap_discards_candidate_entirely():
-    # MYNUMBERの生マッチ「5678-9012-3456」はCREDITCARDが先に確定した範囲
-    # (6, 25)に完全に包含されるため、非重複の残り部分が存在せず、
-    # MYNUMBERの検出は一切結果に現れない（discard）。
-    text = "カード番号 1234-5678-9012-3456"
+    # 旧バージョンの本テストは「カード番号 1234-5678-9012-3456」でMYNUMBER検出が
+    # 無いことを確認していたが、それは当時の(誤って広すぎた)境界ガードのせいで
+    # MYNUMBERの生マッチがそもそも成立していなかった（＝重複解決の破棄ロジックを
+    # 一切通っていなかった）ことが原因だと判明した（レビューでの重要な指摘）。
+    # ここでは境界ガードの状態に依存しない別カテゴリの組み合わせに置き換え、
+    # 破棄(discard)ロジックを確実に経由させる。
+    #
+    # 「電話090-1234-5678です」: PHONEが `0\d{1,4}-\d{1,4}-\d{3,4}` の代替
+    # パターンで先に「090-1234-5678」を確定させる。その後、POSTALの素の数字
+    # パターン `\d{3}-\d{4}` が独立に「090-1234」に生マッチするが、この範囲は
+    # PHONEが確定済みの範囲に完全に包含されるため、非重複の残り部分が存在せず
+    # 破棄される（実際に生の re.finditer で両方のマッチが独立に成立すること、
+    # かつ detect() の結果からPOSTALだけが消えることを確認済み）。
+    text = "電話090-1234-5678です"
     results = det.detect(text)
-    assert ("1234-5678-9012-3456", "CREDITCARD") in {(d.text, d.category) for d in results}
-    assert all(d.category != "MYNUMBER" for d in results)
+    found = {(d.text, d.category) for d in results}
+    assert ("090-1234-5678", "PHONE") in found
+    assert all(d.category != "POSTAL" for d in results)
+
+    for d in results:
+        assert text[d.start:d.end] == d.text
 
 def test_results_sorted_by_start():
     r = det.detect("a@b.jp と 03-1234-5678")
