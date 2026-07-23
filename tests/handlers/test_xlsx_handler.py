@@ -137,3 +137,31 @@ def test_write_replaces_header_variant_text(tmp_path):
 
     reloaded = openpyxl.load_workbook(dst)
     assert reloaded["帳票"].oddHeader.left.text == "作成: 【人名_1】"
+
+
+def test_write_preserves_string_data_type_on_equals_prefix_cell(tmp_path):
+    # 数式と自動判定されないよう、data_type = "s" な文字列セルを作る。
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "データ"
+    ws["A1"] = "placeholder"
+    cell = ws["A1"]
+    cell._value = "=電話番号 090-1234-5678"
+    cell.data_type = "s"
+    src = tmp_path / "eq_mask_src.xlsx"
+    wb.save(src)
+
+    # リード→マスク→ライト
+    frags = h.read_fragments(src)
+    for f in frags:
+        if f.location == "データ!A1":
+            # 電話番号部分のみをマスクし、先頭の "=" は残す
+            f.text = f.text.replace("090-1234-5678", "【電話_1】")
+    dst = tmp_path / "eq_mask_out.xlsx"
+    h.write_fragments(src, dst, frags)
+
+    # ラウンドトリップ後、data_type は "s" のまま、値は正しく更新されていることを確認
+    reloaded = openpyxl.load_workbook(dst)
+    cell_reloaded = reloaded["データ"]["A1"]
+    assert cell_reloaded.data_type == "s"
+    assert cell_reloaded.value == "=電話番号 【電話_1】"

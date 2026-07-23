@@ -71,6 +71,7 @@ class XlsxHandler(FileHandler):
                     loc = f"{orig_title}!{cell.coordinate}"
                     if loc in by_loc:
                         cell.value = by_loc[loc]
+                        cell.data_type = "s"
                     cloc = f"{loc}#comment"
                     if cloc in by_loc and cell.comment is not None:
                         cell.comment.text = by_loc[cloc]
