@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: privacyprotection
+Version: 0.1.0
+Requires-Python: >=3.11
+Requires-Dist: PySide6>=6.6
+Requires-Dist: ginza>=5.2
+Requires-Dist: ja_ginza>=5.2
+Requires-Dist: openpyxl>=3.1
+Requires-Dist: python-docx>=1.1
+Requires-Dist: python-pptx>=0.6.23
+Requires-Dist: charset-normalizer>=3.3
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: pyinstaller>=6.0; extra == "dev"
