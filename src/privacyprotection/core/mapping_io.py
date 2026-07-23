@@ -34,4 +34,9 @@ def read_mapping(path: Path) -> MappingTable:
             )
             for row in reader if row
         ]
+    seen_tokens: set[str] = set()
+    for e in entries:
+        if e.token in seen_tokens:
+            raise ValueError(f"対応表に重複したトークンがあります: {e.token} ({path.name})")
+        seen_tokens.add(e.token)
     return MappingTable(entries=entries)

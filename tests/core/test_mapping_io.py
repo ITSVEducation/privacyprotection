@@ -27,3 +27,16 @@ def test_read_rejects_wrong_header(tmp_path):
     p.write_text("a,b,c,d\r\nx,y,z,1\r\n", encoding="utf-8-sig")
     with pytest.raises(ValueError):
         read_mapping(p)
+
+def test_read_rejects_duplicate_token(tmp_path):
+    # 2つの独立した対応表をマージした場合などに、同一トークンが異なる元の値を
+    # 指す状態になり得る（Restorer が誤ったPIIを復元する重大なリスク）。
+    p = tmp_path / "dup.pmap.csv"
+    p.write_text(
+        "トークン,元の値,種別,出現回数\r\n"
+        "【人名_1】,山田太郎,人名,1\r\n"
+        "【人名_1】,鈴木一郎,人名,1\r\n",
+        encoding="utf-8-sig",
+    )
+    with pytest.raises(ValueError):
+        read_mapping(p)
