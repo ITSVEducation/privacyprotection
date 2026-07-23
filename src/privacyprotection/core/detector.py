@@ -2,43 +2,12 @@
 from __future__ import annotations
 
 from .models import Detection
+# 区間差分ロジックは patterns.py の PatternDetector と共有（core/spans.py に一本化）。
+# `_remaining_spans` の名前は既存の直接インポート（tests/core/test_detector.py）との
+# 後方互換のため、インポート時のエイリアスとして維持している（ローカル実装ではない）。
+from .spans import remaining_spans as _remaining_spans
 
 _SOURCE_PRIORITY = {"dictionary": 0, "pattern": 1, "ner": 2}
-
-
-def _remaining_spans(
-    span: tuple[int, int], taken: list[tuple[int, int]]
-) -> list[tuple[int, int]]:
-    """candidate span から、既に確定済みの taken 区間と重なる部分を除いた
-    非重複の残り区間を返す（設計書4.2: 部分的な重複は重ならない残り部分を再検出）。
-
-    patterns.py の _remaining_spans と同一アルゴリズム（レビュー済み・承認済みの
-    区間差分ロジック）を Detector のマージ処理向けに再利用する。
-
-    - taken と全く重ならなければ span をそのまま1件返す。
-    - taken（複数の場合はその和集合）に完全に覆われていれば空リストを返す
-      （＝候補は丸ごと破棄）。
-    - それ以外（部分重複）は、重ならない部分だけを1件以上の区間として返す
-      （taken が候補の中央にある場合は前後2区間に分かれることもある）。
-    """
-    start, end = span
-    overlapping = sorted(
-        (max(s, start), min(e, end))
-        for s, e in taken
-        if s < end and start < e
-    )
-    if not overlapping:
-        return [span]
-
-    remaining: list[tuple[int, int]] = []
-    cursor = start
-    for s, e in overlapping:
-        if s > cursor:
-            remaining.append((cursor, s))
-        cursor = max(cursor, e)
-    if cursor < end:
-        remaining.append((cursor, end))
-    return remaining
 
 
 class Detector:
