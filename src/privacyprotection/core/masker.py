@@ -5,9 +5,21 @@ import re
 from collections import defaultdict
 
 from .models import CATEGORY_LABELS, TOKEN_RE, Detection, MappingEntry, MappingTable
+from .spans import resolve_overlaps
 
 _REDACT = "●●●●"
 _TOKEN_NUM_RE = re.compile(r"【(?:[^【】_]+)_(\d+)】")
+
+# Detector.detect() は pattern/dictionary/ner の3ソースしか扱わないため重複を
+# 解決済みの状態で Masker に渡ってくる想定だった。だが Task 18 のプレビュー
+# 画面では、ユーザーが手動追加した Detection（source="manual"）が
+# `self.detections[fi]` に直接追記され、既存の自動検出と重なったまま
+# ここへ渡ってくる経路が生まれた。`_ACTIVE_SOURCE_PRIORITY` は
+# `mask_fragments()` がそのような重なりを安全に解決するための優先度表で、
+# 設計書4.3「適用順は プレビューでの手動操作 ＞ カテゴリON/OFF設定 ＞ 検出器」
+# に従い manual を最優先とし、それ以外は detector.py の `_SOURCE_PRIORITY`
+# （dictionary > pattern > ner）をそのまま踏襲する。
+_ACTIVE_SOURCE_PRIORITY = {"manual": -1, "dictionary": 0, "pattern": 1, "ner": 2}
 
 
 class Masker:
@@ -57,7 +69,21 @@ class Masker:
     ) -> tuple[list[str], MappingTable]:
         out: list[str] = []
         for frag, dets in zip(fragments, detections):
-            active = sorted((d for d in dets if d.enabled), key=lambda d: d.start)
+            enabled_dets = [d for d in dets if d.enabled]
+            # 以下の採番・置換ループはいずれも「渡された有効(enabled)な
+            # Detection群は互いに重ならない」ことを前提にしている。
+            # Detector.detect() が返す自動検出だけならこの前提は常に成立
+            # するが、プレビュー画面での手動追加（source="manual"）は
+            # Detector の重複解決を経由せずに直接追記されるため、既存の
+            # 自動検出と重なった状態でここへ渡ってくることがある。
+            # resolve_overlaps() で置換前に必ず解決しておくことで、
+            # 重なったまま置換した場合に起きる文字位置ずれ（原文破壊・
+            # 検出漏れ・二重マスク）を防ぐ（Task 18）。既に非重複な
+            # 入力に対しては何も変えない（trimも破棄も発生しない）ため、
+            # 既存の呼び出し元の挙動には影響しない。
+            active = sorted(
+                resolve_overlaps(enabled_dets, frag, _ACTIVE_SOURCE_PRIORITY),
+                key=lambda d: d.start)
 
             # 新規トークンの採番は、原文の出現順（開始位置の昇順=左から）で
             # 先に確定させる。置換そのものは後述のとおり右から（開始位置の

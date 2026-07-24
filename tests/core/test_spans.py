@@ -8,7 +8,8 @@ patterns.py (PatternDetector) と detector.py (Detector) の両方が重複解�
 test_patterns.py / test_detector.py 側の既存テスト（detect() 経由の統合テスト）
 はそのまま残す。こちらは共有プリミティブ自体への直接的なユニットテスト。
 """
-from privacyprotection.core.spans import remaining_spans
+from privacyprotection.core.models import Detection
+from privacyprotection.core.spans import remaining_spans, resolve_overlaps
 
 
 def test_no_overlap_returns_span_unchanged():
@@ -74,3 +75,66 @@ def test_taken_span_partially_outside_candidate_is_clipped():
     # 候補の範囲内に収まる部分だけが重なりとして扱われる。
     assert remaining_spans((5, 10), [(0, 7)]) == [(7, 10)]
     assert remaining_spans((5, 10), [(8, 100)]) == [(5, 8)]
+
+
+# --- resolve_overlaps() ---
+#
+# Task 18 で、Masker.mask_fragments() が「手動追加(source="manual")が既存の
+# 自動検出と重なる」ケースを安全に解決するために追加した一般化マージ関数。
+# Detector.detect() 内の重複解決アルゴリズム（設計書4.2）と同じロジックを
+# 任意の priority マップに対して適用できるようにしたもの。
+
+def _d(text, cat, start, source):
+    return Detection(text=text, category=cat, start=start,
+                     end=start + len(text), source=source)
+
+
+def test_resolve_overlaps_no_overlap_keeps_both():
+    text = "aaa bbb"
+    candidates = [_d("aaa", "A", 0, "auto"), _d("bbb", "B", 4, "manual")]
+    r = resolve_overlaps(candidates, text, {"manual": 0, "auto": 1})
+    assert [(x.text, x.category, x.start, x.end) for x in r] == [
+        ("aaa", "A", 0, 3), ("bbb", "B", 4, 7),
+    ]
+
+
+def test_resolve_overlaps_longer_span_wins_regardless_of_priority():
+    text = "abcdefghij"
+    shorter_higher_priority = _d("de", "B", 3, "manual")   # len2, priority 0 (best)
+    longer_lower_priority = _d("cdefgh", "A", 2, "auto")   # len6, priority 1
+    r = resolve_overlaps(
+        [shorter_higher_priority, longer_lower_priority], text,
+        {"manual": 0, "auto": 1})
+    assert [(x.text, x.category) for x in r] == [("cdefgh", "A")]
+
+
+def test_resolve_overlaps_same_length_uses_priority_as_tiebreak():
+    text = "abcdefghij"
+    auto = _d("de", "A", 3, "auto")
+    manual = _d("de", "B", 3, "manual")
+    r = resolve_overlaps([auto, manual], text, {"manual": 0, "auto": 1})
+    assert [(x.text, x.category, x.source) for x in r] == [("de", "B", "manual")]
+
+
+def test_resolve_overlaps_partial_overlap_trims_the_loser_not_discard():
+    text = "0123456789AB"
+    auto = _d("56789", "PHONE", 5, "auto")     # (5,10)
+    manual = _d("789AB", "PERSON", 7, "manual")  # (7,12), same length as auto
+    r = resolve_overlaps([auto, manual], text, {"manual": 0, "auto": 1})
+    # manual は priority が高い(0<1)ので (7,12) を丸ごと維持。auto は
+    # 重ならない残り部分 (5,7)="56" だけがトリムされて生き残る。
+    assert [(x.text, x.category, x.start, x.end) for x in r] == [
+        ("56", "PHONE", 5, 7), ("789AB", "PERSON", 7, 12),
+    ]
+    for x in r:
+        assert text[x.start:x.end] == x.text
+
+
+def test_resolve_overlaps_unknown_source_treated_as_lowest_priority():
+    # priority マップに存在しない source は最低優先度(末尾)として扱われる
+    # ため、同じ長さなら既知の source を持つ候補に敗れる。
+    text = "abcdefghij"
+    known = _d("de", "A", 3, "manual")
+    unknown = _d("de", "B", 3, "some_future_source")
+    r = resolve_overlaps([known, unknown], text, {"manual": 0})
+    assert [(x.category, x.source) for x in r] == [("A", "manual")]

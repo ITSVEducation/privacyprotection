@@ -124,7 +124,9 @@ class MainWindow(QMainWindow):
 
     def _mask_paths(self, paths: list[Path]):
         pipeline = self._build_pipeline()
-        # フォルダ or 即変換 → バックグラウンド一括。単一ファイル＋プレビューは Task 18 で接続
+        # フォルダ → バックグラウンド一括。即変換ONならプレビューをスキップして
+        # そのままマスク。それ以外（単一/複数ファイル＋プレビューあり）は
+        # ファイルごとに PreviewDialog を開き、確定後だけマスクを実行する。
         if len(paths) == 1 and paths[0].is_dir():
             self._run_worker(pipeline.mask_folder, paths[0])
         elif self.skip_preview.isChecked():
@@ -133,10 +135,15 @@ class MainWindow(QMainWindow):
                 out, report = pipeline.mask_file(p, frags, dets)
                 self._show_report_text(report_text=self._single_report(report))
         else:
-            QMessageBox.information(
-                self, "プレビュー",
-                "プレビュー画面は次のタスクで接続します。"
-                "現時点では「確認なしで即変換」をONにしてください。")
+            from .preview_dialog import PreviewDialog
+            from .report_dialog import ReportDialog
+            for p in paths:
+                frags, dets = pipeline.analyze_file(p)
+                dlg = PreviewDialog(frags, dets, parent=self)
+                if dlg.exec() != PreviewDialog.Accepted:
+                    continue
+                out, report = pipeline.mask_file(p, frags, dets)
+                ReportDialog(self._single_report(report), parent=self).exec()
 
     def _restore_paths(self, paths: list[Path]):
         pipeline = self._build_pipeline()
@@ -201,7 +208,8 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "エラー", message)
 
     def _show_report_text(self, report_text: str):
-        QMessageBox.information(self, "処理レポート", report_text)
+        from .report_dialog import ReportDialog
+        ReportDialog(report_text, parent=self).exec()
 
     @staticmethod
     def _single_report(report) -> str:
