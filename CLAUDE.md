@@ -15,8 +15,13 @@ that only exists here.
 
 A fully-local Windows desktop app that masks personal/confidential information in text before it's
 pasted into an AI service, and can reverse the masking afterwards. Full requirements are in:
-- `docs/superpowers/specs/2026-07-23-pii-masking-app-design.md` — the approved design spec
-- `docs/superpowers/plans/2026-07-23-pii-masking-app.md` — the 20-task TDD implementation plan being executed
+- `docs/` — the curated, as-built specification set (start at `docs/README.md`). This is the
+  primary, up-to-date spec, split into 01-overview / 02-architecture / 03-masking-spec /
+  04-ui-and-operations / 05-known-issues-and-roadmap. It replaces the original single-file design
+  spec. Section numbers referenced elsewhere in this file (e.g. "design doc §4") now live in these
+  documents (§1–§2 in 01, §3–§5 in 02, §4.2–§4.8 in 03, §6–§9 in 04).
+- `docs/superpowers/plans/2026-07-23-pii-masking-app.md` — the 20-task TDD implementation plan
+  (historical record of how it was built)
 
 **Resuming implementation work:** this project is being built task-by-task via the
 `superpowers:subagent-driven-development` skill. Progress is tracked in
