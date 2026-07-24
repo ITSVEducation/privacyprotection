@@ -91,8 +91,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.drop_zone, stretch=1)
 
         self.clipboard_btn = QPushButton("クリップボードをマスクしてコピー")
-        self.clipboard_btn.clicked.connect(self._mask_clipboard)
+        self.clipboard_btn.clicked.connect(self._clipboard_action)
         layout.addWidget(self.clipboard_btn)
+
+        # モード（マスク/復元）に応じてクリップボードボタンのラベルと挙動を
+        # 切り替える（Finding 3）。ラジオボタンはどちらか一方のtoggled(True)
+        # だけを見れば十分（QButtonGroupで排他制御されているため）。
+        self.mask_radio.toggled.connect(self._update_clipboard_button_label)
+        self._update_clipboard_button_label()
 
         self.progress = QProgressBar()
         self.progress.setVisible(False)
@@ -145,31 +151,98 @@ class MainWindow(QMainWindow):
             self._run_worker(pipeline.mask_folder, paths[0])
         elif self.skip_preview.isChecked():
             for p in paths:
-                frags, dets = pipeline.analyze_file(p)
-                out, report = pipeline.mask_file(p, frags, dets)
-                self._show_report_text(report_text=self._single_report(report))
+                # 未対応拡張子・(単一ファイルモードへの)フォルダの混在ドロップ・
+                # ハンドラの読み書きエラー等、1件の失敗で残りの処理まで
+                # 巻き込んで落ちないよう、ファイル単位で例外を捕える
+                # （Finding 4）。mask_folder の per-file except ブロックと
+                # 同じ一般的なメッセージ形式に揃える。
+                try:
+                    frags, dets = pipeline.analyze_file(p)
+                    out, report = pipeline.mask_file(p, frags, dets)
+                    self._show_report_text(report_text=self._single_report(report))
+                except Exception as exc:
+                    QMessageBox.warning(
+                        self, "エラー",
+                        f"{p.name}: {type(exc).__name__}: 処理できませんでした")
         else:
             from .preview_dialog import PreviewDialog
             from .report_dialog import ReportDialog
             for p in paths:
-                frags, dets = pipeline.analyze_file(p)
-                dlg = PreviewDialog(frags, dets, parent=self)
-                if dlg.exec() != PreviewDialog.Accepted:
-                    continue
-                out, report = pipeline.mask_file(p, frags, dets)
-                ReportDialog(self._single_report(report), parent=self).exec()
+                try:
+                    frags, dets = pipeline.analyze_file(p)
+                    dlg = PreviewDialog(frags, dets, parent=self)
+                    if dlg.exec() != PreviewDialog.Accepted:
+                        continue
+                    out, report = pipeline.mask_file(p, frags, dets)
+                    ReportDialog(self._single_report(report), parent=self).exec()
+                except Exception as exc:
+                    QMessageBox.warning(
+                        self, "エラー",
+                        f"{p.name}: {type(exc).__name__}: 処理できませんでした")
 
     def _restore_paths(self, paths: list[Path]):
         pipeline = self._build_pipeline()
         for p in paths:
             try:
-                out, result = pipeline.restore_file(p)
-                msg = f"復元しました: {out.name}"
-                if result.unknown_tokens:
-                    msg += f"\n未知トークン {len(result.unknown_tokens)} 件がそのまま残っています"
-                QMessageBox.information(self, "復元完了", msg)
-            except FileNotFoundError as exc:
-                QMessageBox.warning(self, "復元エラー", str(exc))
+                self._restore_one(pipeline, p)
+            except Exception as exc:
+                # read_mapping の重複トークン検出(ValueError)、未対応拡張子
+                # (ValueError)、単一/復元モードへのフォルダの混在ドロップ
+                # (ValueError)、Handlerの読み書きエラー等、あらゆる失敗を
+                # ここで一括して捕え、ファイル単位のダイアログに留める
+                # （Finding 4。mask_folder の except ブロックと同じ文言形式）。
+                QMessageBox.warning(
+                    self, "復元エラー",
+                    f"{p.name}: {type(exc).__name__}: 処理できませんでした")
+
+    def _restore_one(self, pipeline: Pipeline, p: Path) -> None:
+        try:
+            out, result = pipeline.restore_file(p)
+        except FileNotFoundError:
+            # 対応表の自動検出（<マスク済ファイル名>.pmap.csv）に失敗した場合
+            # （典型的にはフォルダ一括処理の出力: 対応表は共有の
+            # `_folder.pmap.csv` にしかない）。ユーザーに対応表を明示的に
+            # 指定してもらってから再試行する（Finding 2）。
+            mapping_path = self._resolve_mapping_path(p)
+            if mapping_path is None:
+                return  # ユーザーがキャンセル: このファイルは静かにスキップ
+            out, result = pipeline.restore_file(p, mapping_path=mapping_path)
+        msg = f"復元しました: {out.name}"
+        if result.unknown_tokens:
+            msg += f"\n未知トークン {len(result.unknown_tokens)} 件がそのまま残っています"
+        QMessageBox.information(self, "復元完了", msg)
+
+    def _resolve_mapping_path(self, masked_path: Path) -> Path | None:
+        """対応表(.pmap.csv)の場所をユーザーに教えてもらう（Finding 2）。
+
+        まず同じフォルダに `_folder.pmap.csv`（フォルダ一括処理が書き出す
+        共有対応表）がないか一手先に見てみる — フォルダ一括処理の出力を
+        復元しようとしている典型ケースをダイアログなしで即座に解決できる。
+        見つからなければファイル選択ダイアログでユーザーに指定してもらう。
+        """
+        folder_mapping = masked_path.parent / "_folder.pmap.csv"
+        if folder_mapping.exists():
+            return folder_mapping
+        path_str, _ = QFileDialog.getOpenFileName(
+            self, "対応表(.pmap.csv)を選択", str(masked_path.parent),
+            "対応表 (*.pmap.csv)")
+        return Path(path_str) if path_str else None
+
+    # --- クリップボード -----------------------------------------------
+    def _clipboard_action(self):
+        # クリップボードボタンはモード切替ラジオボタンに連動する
+        # （Finding 3）: マスクモードでは従来通りマスク、復元モードでは
+        # 復元を行う。
+        if self.restore_radio.isChecked():
+            self._restore_clipboard()
+        else:
+            self._mask_clipboard()
+
+    def _update_clipboard_button_label(self):
+        if self.restore_radio.isChecked():
+            self.clipboard_btn.setText("クリップボードを復元してコピー")
+        else:
+            self.clipboard_btn.setText("クリップボードをマスクしてコピー")
 
     def _mask_clipboard(self):
         cb = QGuiApplication.clipboard()
@@ -199,14 +272,59 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "マスク完了",
                                     f"{count}件をマスクしてコピーしました。")
 
+    def _restore_clipboard(self):
+        """クリップボードの文字列（AIの回答を貼り戻したもの等）を、
+        指定した対応表で復元する（Finding 3）。ファイルと違い自動検出の
+        しようがない生テキストのため、対応表は常にダイアログで指定させる。
+        """
+        cb = QGuiApplication.clipboard()
+        text = cb.text()
+        if not text:
+            QMessageBox.information(self, "クリップボード", "テキストがありません")
+            return
+        path_str, _ = QFileDialog.getOpenFileName(
+            self, "対応表(.pmap.csv)を選択", filter="対応表 (*.pmap.csv)")
+        if not path_str:
+            return
+        pipeline = self._build_pipeline()
+        try:
+            result = pipeline.restore_text(text, Path(path_str))
+        except Exception as exc:
+            # 破損・重複トークンの対応表(ValueError)等（Finding 4）。
+            QMessageBox.warning(
+                self, "復元エラー", f"{type(exc).__name__}: 処理できませんでした")
+            return
+        cb.setText(result.text)
+        if result.unknown_tokens:
+            QMessageBox.information(
+                self, "復元完了",
+                f"クリップボードを復元しました。\n"
+                f"未知トークン {len(result.unknown_tokens)} 件がそのまま残っています")
+        else:
+            QMessageBox.information(self, "復元完了", "クリップボードを復元しました。")
+
     # --- ワーカー実行 ----------------------------------------------------
     def _run_worker(self, fn, *args):
+        # 前回のワーカーがまだ実行中のまま self._worker を差し替えると、
+        # 生きているQThreadへの参照を黙って失う（Finding 5）。新規実行を
+        # 拒否し、ユーザーに完了を待つよう伝える。
+        if self._worker is not None and self._worker.isRunning():
+            QMessageBox.information(
+                self, "処理中", "前の処理が完了するまでお待ちください")
+            return
         self.progress.setVisible(True)
+        self._set_controls_enabled(False)
         self._worker = MaskWorker(fn, *args)
         self._worker.progress.connect(self._on_progress)
         self._worker.finished_ok.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
+
+    def _set_controls_enabled(self, enabled: bool) -> None:
+        """ワーカー実行中は、新たな実行の引き金になりうる操作を止める
+        （Finding 5）。"""
+        self.drop_zone.setEnabled(enabled)
+        self.clipboard_btn.setEnabled(enabled)
 
     def _on_progress(self, i, total, name):
         self.progress.setMaximum(total)
@@ -214,11 +332,13 @@ class MainWindow(QMainWindow):
 
     def _on_finished(self, result):
         self.progress.setVisible(False)
+        self._set_controls_enabled(True)
         batch, mapping_path = result
         self._show_report_text(batch.render_text())
 
     def _on_failed(self, message):
         self.progress.setVisible(False)
+        self._set_controls_enabled(True)
         QMessageBox.critical(self, "エラー", message)
 
     def _show_report_text(self, report_text: str):
