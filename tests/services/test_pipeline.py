@@ -4,6 +4,7 @@ import docx
 import openpyxl
 import pytest
 from pptx import Presentation
+from pptx.util import Inches
 from privacyprotection.config import AppConfig
 from privacyprotection.core.detector import Detector
 from privacyprotection.core.dictionary import DictionaryDetector
@@ -11,7 +12,10 @@ from privacyprotection.core.mapping_io import read_mapping
 from privacyprotection.core.masker import Masker
 from privacyprotection.core.models import TOKEN_RE, Detection, Fragment
 from privacyprotection.core.patterns import PatternDetector
+from privacyprotection.handlers.docx_handler import DocxHandler
+from privacyprotection.handlers.pptx_handler import PptxHandler
 from privacyprotection.handlers.text_handler import TextHandler
+from privacyprotection.handlers.xlsx_handler import XlsxHandler
 from privacyprotection.services.pipeline import Pipeline
 
 
@@ -441,3 +445,77 @@ def test_plain_text_report_has_no_office_specific_note(tmp_path):
     frags, dets = pl.analyze_file(src)
     _, report = pl.mask_file(src, frags, dets)
     assert report.notes == []
+
+
+# --- マスク→復元ラウンドトリップ（Office形式）---
+#
+# 設計書8章は「全対応形式」でのラウンドトリップ検証を求めているが、これまで
+# Pipeline経由のend-to-endテストはテキスト形式のみだった。各Office形式について
+# 実ファイルを作り、mask_file → restore_file を通して、復元後の内容が
+# 同じHandlerのread_fragments経由で元と完全に一致することを確認する。
+
+def test_mask_restore_roundtrip_xlsx(tmp_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "名簿"
+    ws["A1"] = "山田太郎"
+    ws["A2"] = "連絡先: 03-1234-5678"
+    ws["A3"] = "佐藤花子"
+    src = tmp_path / "book.xlsx"
+    wb.save(src)
+
+    pl = make_pipeline()
+    frags, dets = pl.analyze_file(src)
+    masked_path, _ = pl.mask_file(src, frags, dets)
+    assert masked_path != src
+    restored_path, result = pl.restore_file(masked_path)
+
+    handler = XlsxHandler()
+    original = {f.location: f.text for f in handler.read_fragments(src)}
+    restored = {f.location: f.text for f in handler.read_fragments(restored_path)}
+    assert restored == original
+    assert result.unknown_tokens == []
+
+
+def test_mask_restore_roundtrip_docx(tmp_path):
+    d = docx.Document()
+    d.add_paragraph("担当: 山田太郎")
+    t = d.add_table(rows=1, cols=2)
+    t.cell(0, 0).text = "佐藤花子"
+    t.cell(0, 1).text = "090-1111-2222"
+    d.sections[0].header.paragraphs[0].text = "社外秘 山田太郎"
+    src = tmp_path / "doc.docx"
+    d.save(src)
+
+    pl = make_pipeline()
+    frags, dets = pl.analyze_file(src)
+    masked_path, _ = pl.mask_file(src, frags, dets)
+    restored_path, result = pl.restore_file(masked_path)
+
+    handler = DocxHandler()
+    original = {f.location: f.text for f in handler.read_fragments(src)}
+    restored = {f.location: f.text for f in handler.read_fragments(restored_path)}
+    assert restored == original
+    assert result.unknown_tokens == []
+
+
+def test_mask_restore_roundtrip_pptx(tmp_path):
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[5])  # Title Only
+    slide.shapes.title.text = "山田太郎の報告"
+    box = slide.shapes.add_textbox(Inches(1), Inches(2), Inches(4), Inches(1))
+    box.text_frame.text = "連絡先: 090-1111-2222"
+    slide.notes_slide.notes_text_frame.text = "佐藤花子に確認"
+    src = tmp_path / "deck.pptx"
+    prs.save(src)
+
+    pl = make_pipeline()
+    frags, dets = pl.analyze_file(src)
+    masked_path, _ = pl.mask_file(src, frags, dets)
+    restored_path, result = pl.restore_file(masked_path)
+
+    handler = PptxHandler()
+    original = {f.location: f.text for f in handler.read_fragments(src)}
+    restored = {f.location: f.text for f in handler.read_fragments(restored_path)}
+    assert restored == original
+    assert result.unknown_tokens == []
