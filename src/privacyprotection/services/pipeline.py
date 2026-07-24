@@ -7,10 +7,14 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
+from ..config import AppConfig
 from ..core.detector import Detector
+from ..core.dictionary import DictionaryDetector
 from ..core.mapping_io import read_mapping, write_mapping
 from ..core.masker import Masker
 from ..core.models import Detection, Fragment, MappingTable, RestoreResult
+from ..core.ner import NerDetector
+from ..core.patterns import PatternDetector
 from ..core.restorer import Restorer
 from ..handlers.folder_walker import walk
 from ..handlers.registry import get_handler
@@ -71,6 +75,48 @@ class Pipeline:
     def __init__(self, detector: Detector, mode: str):
         self._detector = detector
         self._mode = mode
+
+    @classmethod
+    def from_config(cls, cfg: AppConfig) -> "Pipeline":
+        """`AppConfig` から Pipeline を組み立てるファクトリ（設計書 6.1）。
+
+        GUI 層（`gui/`）は `core/` の各検出器（`PatternDetector` 等）や
+        `Detector` を直接インポートしてはならない（CLAUDE.md のアーキテクチャ
+        制約: 「GUIは services/ にのみ依存し、core/・handlers/ を直接
+        importしない」）。このメソッドは、その組み立て責務を Pipeline の
+        公開APIとして提供することで、GUI 側が core/ に触れずに済むように
+        するためのものであり、`Pipeline.__init__` が既に受け取る
+        `detector`/`mode` の構成をそのまま内部で行うだけの薄いラッパー。
+        """
+        detector = Detector(
+            [PatternDetector(), DictionaryDetector(cfg.custom_dictionary), NerDetector()],
+            enabled_categories=cfg.enabled_categories,
+        )
+        return cls(detector=detector, mode=cfg.mask_mode)
+
+    def mask_text(self, text: str, masker: Masker | None = None,
+                  mapping_path: Path | None = None) -> tuple[str, MappingTable, int]:
+        """ファイルを介さない生テキスト（クリップボード等）をマスクする。
+
+        戻り値は (マスク済みテキスト, 対応表, 検出件数)。検出件数を対応表の
+        `entries` の有無だけから判定してはいけない —
+        redact モードでは `Masker` の仕様上、対応表は検出の有無に関わらず
+        常に空になる（`core/masker.py` の `test_redact_mode_no_mapping` が
+        固定化している挙動）。そのため検出件数はこの戻り値で別途明示する。
+
+        `mapping_path` を指定し、かつ token モードで実際に対応表エントリが
+        生成された場合のみ、対応表CSVをそこへ書き出す。フォルダ一括処理
+        （`mask_folder`）と異なり単発呼び出しのため、検出0件時にまで
+        空の対応表ファイルを作る必要はない。
+        """
+        detections = self._detector.detect(text)
+        active_count = sum(1 for d in detections if d.enabled)
+        m = masker or Masker(mode=self._mode)
+        m.scan_existing_tokens([text])
+        masked_texts, table = m.mask_fragments([text], [detections])
+        if self._mode == "token" and mapping_path is not None and table.entries:
+            _atomic_write(lambda p: write_mapping(table, p), mapping_path)
+        return masked_texts[0], table, active_count
 
     def analyze_file(self, path: Path):
         handler = get_handler(path)
