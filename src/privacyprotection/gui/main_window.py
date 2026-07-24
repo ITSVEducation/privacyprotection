@@ -105,6 +105,20 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
 
+        # メニュー/アクションは self に保持する（ローカル変数のままだと
+        # PySide6のオブジェクト所有権管理上、参照が残らずGCされる余地がある
+        # ため、他ウィジェットと同様に明示的に self 経由で保持する）。
+        self._tools_menu = self.menuBar().addMenu("ツール")
+        self._settings_action = self._tools_menu.addAction("設定...")
+        self._settings_action.triggered.connect(self._open_settings)
+
+    # --- 設定画面 --------------------------------------------------------
+    def _open_settings(self):
+        from .settings_dialog import SettingsDialog
+        dlg = SettingsDialog(self._config, parent=self)
+        if dlg.exec() == SettingsDialog.Accepted:
+            save_config(self._config)
+
     # --- pipeline 構築 -------------------------------------------------
     def _build_pipeline(self) -> Pipeline:
         # mask_mode はラジオボタンの現在の選択を優先する（self._config は

@@ -53,6 +53,31 @@ def test_disabled_category_filtered():
     assert [(x.category,) for x in r] == [("PERSON",)]
 
 
+def test_dictionary_source_bypasses_category_filter():
+    # Task 19 調査1: カスタム辞書由来(source="dictionary")の検出は、
+    # ユーザーがその語句にCUSTOM以外の種別(例: PERSON)を割り当てていても、
+    # その種別のチェックボックスがOFF(enabled_categoriesに含まれない)な状態
+    # でも常に検出されなければならない。辞書登録は「必ずマスクしたい」という
+    # ユーザーの明示的な意思表示であり、自動検出(pattern/ner)のON/OFF設定に
+    # 巻き込まれて黙って無効化されてはならない。
+    dic = FakeDetector([d("山田太郎", "PERSON", 0, "dictionary")])
+    r = Detector([dic], enabled_categories={"CUSTOM"}).detect("山田太郎")
+    assert [(x.text, x.category, x.source) for x in r] == [
+        ("山田太郎", "PERSON", "dictionary"),
+    ]
+
+
+def test_non_dictionary_source_still_filtered_by_category():
+    # 上のテストの陰性対照: 辞書検出の例外はsource=="dictionary"の候補にのみ
+    # 適用されるべきで、同じPERSON種別でもner/pattern由来の候補は従来通り
+    # enabled_categoriesでフィルタされ続けなければならない
+    # (「PERSONのチェックを外す」操作が自動検出に対しては引き続き機能する
+    # ことの確認)。
+    ner = FakeDetector([d("山田太郎", "PERSON", 0, "ner")])
+    r = Detector([ner], enabled_categories={"CUSTOM"}).detect("山田太郎")
+    assert r == []
+
+
 # --- 追加テスト ---
 
 def test_remaining_spans_middle_claim_splits_into_two_segments():

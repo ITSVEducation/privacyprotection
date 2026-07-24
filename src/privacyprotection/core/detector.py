@@ -40,7 +40,25 @@ class Detector:
             candidates.extend(det.detect(text))
 
         if self._enabled is not None:
-            candidates = [c for c in candidates if c.category in self._enabled]
+            # source=="dictionary"（カスタム辞書由来）の候補は、種別が何であれ
+            # カテゴリON/OFFフィルタの対象外とし、常に通す。
+            #
+            # 背景（Task 19 調査1）: カスタム辞書はユーザーが「この語句は必ず
+            # マスクしたい」と明示的に登録したものであり、GUIの辞書テーブルは
+            # その語句にCUSTOM以外の種別（PERSON等）も自由に割り当てられる
+            # （設定画面「種別」列）。もしこのフィルタを他の検出源と同様に
+            # category ベースで一律に適用してしまうと、ユーザーが「自動NER検出
+            # のPERSONを止めたい」という意図で「人名」チェックを外しただけで、
+            # 自分がPERSONとして明示登録した辞書語まで一緒に黙って検出されなく
+            # なる（辞書登録＝最も強い「マスクしてほしい」という意思表示なのに、
+            # それがチェックボックスの副作用で無効化される）。これは
+            # `gui/settings_dialog.py` の `_on_accept()` にあった
+            # `enabled.add("CUSTOM")`（"CUSTOM"という文字列だけを特別扱い）
+            # では防げない――ユーザーがCUSTOM以外の種別で登録した場合は素通り
+            # してしまうため、根本原因であるこの層（全検出源に共通フィルタを
+            # 適用する箇所）で修正する。
+            candidates = [c for c in candidates
+                          if c.source == "dictionary" or c.category in self._enabled]
 
         # 長い範囲優先 → ソース優先度 → 開始位置の順の重複解決（設計書4.2）は
         # `resolve_overlaps()` に委譲する（trim-not-discardの実装は共有の
