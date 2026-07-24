@@ -2,10 +2,16 @@
 
 アーキテクチャ制約（CLAUDE.md）についての注記: `..core.models` から
 `CATEGORY_LABELS`/`Detection` をインポートしているが、これは違反ではない。
-`Fragment`/`Detection`/`CATEGORY_LABELS` は `Pipeline.analyze_file()` が
-呼び出し側へそのまま返す素のデータ型であり、GUI はそれを表示・編集する
-だけで、検出器やマスカーの組み立て（禁止されている業務ロジックの再実装）は
-一切行っていない。
+`Fragment`/`Detection`/`CATEGORY_LABELS` は `Pipeline.analyze_file()` /
+`Pipeline.analyze_text()` が呼び出し側へそのまま返す素のデータ型であり、GUI は
+それを表示・編集するだけで、検出器やマスカーの組み立て（禁止されている業務
+ロジックの再実装）は一切行っていない。
+
+左ペインの直接操作（2026-07-24 設計）:
+- ドラッグで範囲選択して離す → その範囲を「カスタム」の手動検出として即追加。
+- ハイライト部分を（選択せず）クリック → その検出を無効化（右リストの
+  チェックを外すのと同義。再有効化は右リストのチェックで行う）。
+- カテゴリ変更は右リスト項目の右クリックメニューで行う。
 """
 from __future__ import annotations
 
@@ -26,15 +32,43 @@ _CATEGORY_COLORS = {
 }
 _DEFAULT_CATEGORY_COLOR = _CATEGORY_COLORS["CUSTOM"]
 
+# ドラッグで手動追加する既定カテゴリ。範囲を選んで離すだけで即マスク対象に
+# できるよう「カスタム」で追加し、別カテゴリにしたいときは右リストの右クリック
+# メニューで変更する（2026-07-24 設計）。
+_DRAG_ADD_CATEGORY = "CUSTOM"
+
 # ラベルが重複するカテゴリ（POSTAL/MYNUMBER/CREDITCARD は全て「番号」）が
-# 手動追加メニューに複数現れると、ユーザーには見分けの付かない同一の
-# メニュー項目が並ぶだけになる（Task 18 調査3）。かつ
-# core/models.py の `LABEL_TO_CATEGORY` が既に「同じラベルの
-# カテゴリはCATEGORY_LABELS宣言順で最初に出てきたものを代表として扱う」
-# という割り切りを採用している（Task 16 レビューで既知・許容済みの
-# 割り切り、最終レビュー Finding 6 で core/models.py へ一本化）ため、
-# 手動追加メニューでも同じ代表選びの規則に揃える。これにより「メニューで
-# どれを選んでも復元時の代表カテゴリと一致する」一貫性が保てる。
+# カテゴリ変更メニューに複数現れると、ユーザーには見分けの付かない同一の
+# メニュー項目が並ぶだけになる。core/models.py の `LABEL_TO_CATEGORY` が既に
+# 「同じラベルのカテゴリはCATEGORY_LABELS宣言順で最初に出てきたものを代表と
+# して扱う」という割り切りを採用しているため、メニューでも同じ代表選びの
+# 規則に揃える（どれを選んでも復元時の代表カテゴリと一致する一貫性が保てる）。
+
+
+class _InteractiveTextView(QTextEdit):
+    """読み取り専用のまま、左ボタンを離した時の操作を親へ通知するビュー。
+
+    選択あり（ドラッグ／ダブルクリック）→ `on_select(start, end)`＝範囲を
+    手動検出として追加。選択なし（単純クリック）→ `on_click(pos)`＝その位置の
+    検出を無効化。QTextEdit では単純クリックで選択が消えてカーソルだけ移動する
+    ため、離した時点で選択の有無を見ればドラッグとクリックを確実に区別できる。
+    """
+
+    def __init__(self, on_select, on_click, parent=None):
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self._on_select = on_select
+        self._on_click = on_click
+
+    def mouseReleaseEvent(self, e):
+        super().mouseReleaseEvent(e)
+        if e.button() != Qt.LeftButton:
+            return
+        cursor = self.textCursor()
+        if cursor.hasSelection():
+            self._on_select(cursor.selectionStart(), cursor.selectionEnd())
+        else:
+            self._on_click(cursor.position())
 
 
 class PreviewDialog(QDialog):
@@ -47,14 +81,14 @@ class PreviewDialog(QDialog):
 
         splitter = QSplitter(Qt.Horizontal)
 
-        self.text_view = QTextEdit()
-        self.text_view.setReadOnly(True)
-        self.text_view.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.text_view.customContextMenuRequested.connect(self._context_menu)
+        self.text_view = _InteractiveTextView(
+            on_select=self._on_drag_select, on_click=self._on_click_disable)
         splitter.addWidget(self.text_view)
 
         self.list_view = QListWidget()
         self.list_view.itemChanged.connect(self._on_item_toggled)
+        self.list_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list_view.customContextMenuRequested.connect(self._list_context_menu)
         splitter.addWidget(self.list_view)
         splitter.setSizes([600, 300])
 
@@ -94,9 +128,9 @@ class PreviewDialog(QDialog):
                 self.list_view.addItem(item)
                 if d.enabled:
                     fmt = QTextCharFormat()
-                    # 手編集のconfig.jsonに由来する固定10種以外のカテゴリ
-                    # （Finding 7）でもKeyErrorで落ちないよう、色が定義されて
-                    # いなければCUSTOMと同じ色にフォールバックする。
+                    # 手編集のconfig.jsonに由来する固定10種以外のカテゴリでも
+                    # KeyErrorで落ちないよう、色が定義されていなければCUSTOMと
+                    # 同じ色にフォールバックする。
                     fmt.setBackground(QColor(
                         _CATEGORY_COLORS.get(d.category, _DEFAULT_CATEGORY_COLOR)))
                     cursor.setPosition(self._offsets[fi] + d.start)
@@ -110,23 +144,50 @@ class PreviewDialog(QDialog):
         d.enabled = item.checkState() == Qt.Checked
         self._refresh()
 
-    def _context_menu(self, pos):
-        cursor = self.text_view.textCursor()
-        selected = cursor.selectedText()
-        if not selected:
-            return
-        menu = QMenu(self)
-        # ラベル単位で重複排除した代表カテゴリ1つにつき1メニュー項目を出す
-        # （調査3: POSTAL/MYNUMBER/CREDITCARDが同じ「番号」で3つ並ぶのを防ぐ）。
-        for label, category in sorted(LABEL_TO_CATEGORY.items()):
-            action = QAction(f"「{selected}」を{label}として追加", menu)
-            action.triggered.connect(
-                lambda _=False, c=category: self._add_manual(cursor, c))
-            menu.addAction(action)
-        menu.exec(self.text_view.mapToGlobal(pos))
+    # --- 左ペインの直接操作 --------------------------------------------
+    def _on_drag_select(self, sel_start: int, sel_end: int):
+        """ドラッグ選択された範囲を「カスタム」の手動検出として追加する。"""
+        self._add_manual(sel_start, sel_end, _DRAG_ADD_CATEGORY)
 
-    def _add_manual(self, cursor, category):
-        sel_start, sel_end = cursor.selectionStart(), cursor.selectionEnd()
+    def _on_click_disable(self, pos: int):
+        """連結テキスト上の位置 `pos` を含む有効な検出を1件無効化する。
+
+        複数の有効な検出が重なる位置では、最後に追加された（＝最前面に
+        見えている）ものを無効化する。段階的にクリックすれば奥のものも
+        消せるため実害はない。無効化するとハイライトが消え、右リストの
+        チェックも自動的に外れる（_refresh がチェック状態を d.enabled から
+        再構築するため）。再有効化は右リストのチェックで行う。
+        """
+        for fi in reversed(range(len(self._offsets))):
+            if pos >= self._offsets[fi]:
+                frag_pos = pos - self._offsets[fi]
+                for d in reversed(self.detections[fi]):
+                    if d.enabled and d.start <= frag_pos < d.end:
+                        d.enabled = False
+                        self._refresh()
+                        return
+                return
+
+    def _list_context_menu(self, pos):
+        item = self.list_view.itemAt(pos)
+        if item is None:
+            return
+        _, d = item.data(Qt.UserRole)
+        menu = QMenu(self)
+        # ラベル単位で重複排除した代表カテゴリ1つにつき1項目を出す
+        # （POSTAL/MYNUMBER/CREDITCARD が同じ「番号」で3つ並ぶのを防ぐ）。
+        for label, category in sorted(LABEL_TO_CATEGORY.items()):
+            action = QAction(f"「{label}」に変更", menu)
+            action.triggered.connect(
+                lambda _=False, det=d, c=category: self._change_category(det, c))
+            menu.addAction(action)
+        menu.exec(self.list_view.mapToGlobal(pos))
+
+    def _change_category(self, detection: Detection, category: str):
+        detection.category = category
+        self._refresh()
+
+    def _add_manual(self, sel_start: int, sel_end: int, category: str):
         # どの断片か特定（offsetsは各断片の開始位置＝直前までの断片＋区切り
         # 改行の累計なので、sel_start以下で最大のoffsetを持つ断片を選ぶ）。
         for fi in reversed(range(len(self._offsets))):
@@ -134,14 +195,12 @@ class PreviewDialog(QDialog):
                 frag_start = sel_start - self._offsets[fi]
                 frag_end = sel_end - self._offsets[fi]
                 frag_len = len(self.fragments[fi].text)
-                # 調査2: 選択範囲が断片境界（連結時に挿入した改行、または
-                # 次の断片）をまたいでいないかを確認する。またいでいる場合、
-                # 元のコード（コメントで「またがない前提」と認めつつ実際の
-                # ガードがなかった）のように黙って frag_end を断片長で
-                # クリップしてしまうと、ユーザーの選択範囲の一部が記録
-                # されないまま Detection.text が短く確定してしまい、
-                # 気づかれないままマスク漏れにつながる。ここでは黙って
-                # 切り詰めず、操作を中止してユーザーに伝える。
+                # 選択範囲が断片境界（連結時に挿入した改行、または次の断片）を
+                # またいでいないかを確認する。またいでいる場合、黙って frag_end を
+                # 断片長でクリップすると、ユーザーの選択範囲の一部が記録されない
+                # まま Detection.text が短く確定してしまい、気づかれないまま
+                # マスク漏れにつながる。ここでは黙って切り詰めず、操作を中止して
+                # ユーザーに伝える（マスク漏れに直結するため警告は残す）。
                 if frag_start >= frag_len or frag_end > frag_len:
                     QMessageBox.warning(
                         self, "追加できません",
@@ -150,38 +209,13 @@ class PreviewDialog(QDialog):
                     return
                 text = self.fragments[fi].text[frag_start:frag_end]
                 if text:
-                    new_detection = Detection(
+                    # この時点で既存の有効な検出と重なっていても、データ破壊は
+                    # core/masker.py 側の resolve_overlaps によって防がれる
+                    # （優先順位: 手動 > 辞書 > パターン > NER、同順位なら範囲が
+                    # 長い方）。重なりの結果はハイライトに反映されて見えるため、
+                    # ドラッグごとに情報ダイアログは出さない（軽快さを優先）。
+                    self.detections[fi].append(Detection(
                         text=text, category=category,
-                        start=frag_start, end=frag_end, source="manual")
-                    # 調査1: この時点で既存の有効な検出と重なっていても、
-                    # データ破壊は core/masker.py 側の resolve_overlaps に
-                    # よって防がれる（優先順位: 手動 > 辞書 > パターン > NER、
-                    # 同順位なら範囲が長い方）。ただし、ユーザーがそのことに
-                    # 気づかないまま「追加したのに何も変わらなかった」と
-                    # 感じないよう、重なりがある場合はここで一言伝える。
-                    overlap = self._enabled_overlap(fi, new_detection)
-                    self.detections[fi].append(new_detection)
-                    if overlap is not None:
-                        QMessageBox.information(
-                            self, "既存の検出と重複しています",
-                            f"選択範囲は既存の検出「[{CATEGORY_LABELS.get(overlap.category, overlap.category)}] "
-                            f"{overlap.text}」と重なっています。マスク実行時に、"
-                            "範囲が広い方（同じ範囲なら今回の手動追加）が優先され、"
-                            "重複しない部分は自動的に解決されます。")
+                        start=frag_start, end=frag_end, source="manual"))
                 break
         self._refresh()
-
-    @staticmethod
-    def _overlaps(a_start, a_end, b_start, b_end) -> bool:
-        return a_start < b_end and b_start < a_end
-
-    def _enabled_overlap(self, fi: int, new_detection: Detection) -> Detection | None:
-        """同一断片内で、追加しようとしている検出と重なる既存の有効な検出が
-        あれば1件返す（ユーザーへの警告表示用。実際のマスク時の重複解決は
-        core/masker.py が担う）。"""
-        for existing in self.detections[fi]:
-            if existing.enabled and self._overlaps(
-                    new_detection.start, new_detection.end,
-                    existing.start, existing.end):
-                return existing
-        return None

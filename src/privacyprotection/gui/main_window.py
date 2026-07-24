@@ -268,9 +268,23 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "クリップボード", "テキストがありません")
             return
         pipeline = self._build_pipeline()
+
+        # クリップボードもファイルと同じく、検出結果をプレビューで確認・編集
+        # してから確定する（「確認なしで即変換」ONのときはスキップ）。
+        # AIへ貼り付ける直前の最終ゲートなので、目視確認できることが望ましい。
+        frag, dets = pipeline.analyze_text(text)
+        if not self.skip_preview.isChecked():
+            from .preview_dialog import PreviewDialog
+            dlg = PreviewDialog([frag], [dets], parent=self)
+            if dlg.exec() != PreviewDialog.Accepted:
+                return  # キャンセル時はクリップボードを変更しない
+            # PreviewDialog は [dets] を in-place 編集するため、確定後の dets が
+            # そのまま編集結果（追加/無効化/カテゴリ変更を反映）になっている。
+
         pmap = default_config_path().parent / "clipboard.pmap.csv"
         pmap.parent.mkdir(parents=True, exist_ok=True)
-        masked, table, count = pipeline.mask_text(text, mapping_path=pmap)
+        masked, table, count = pipeline.mask_text(
+            text, mapping_path=pmap, detections=dets)
         cb.setText(masked)
         if count == 0:
             # 検出0件の理由は「トークンモードで対応表が空」ではなく

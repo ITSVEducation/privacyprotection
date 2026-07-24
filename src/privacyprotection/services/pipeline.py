@@ -117,8 +117,23 @@ class Pipeline:
         )
         return cls(detector=detector, mode=cfg.mask_mode)
 
+    def analyze_text(self, text: str) -> tuple[Fragment, list[Detection]]:
+        """ファイルを介さない生テキスト（クリップボード等）を、1つの
+        `Fragment(location="clipboard")` と検出リストに変換して返す。
+
+        `analyze_file` の生テキスト版。GUI 層（`gui/`）が `PreviewDialog` で
+        検出結果を確認・編集するために必要だが、GUI は `core/` の検出器を
+        直接インポートしてはならない（CLAUDE.md のアーキテクチャ制約）ため、
+        検出器を呼ぶ責務を Pipeline の公開 API として提供する
+        （`analyze_file` と同じ役割）。
+        """
+        fragment = Fragment(text=text, location="clipboard")
+        return fragment, self._detector.detect(text)
+
     def mask_text(self, text: str, masker: Masker | None = None,
-                  mapping_path: Path | None = None) -> tuple[str, MappingTable, int]:
+                  mapping_path: Path | None = None,
+                  detections: list[Detection] | None = None
+                  ) -> tuple[str, MappingTable, int]:
         """ファイルを介さない生テキスト（クリップボード等）をマスクする。
 
         戻り値は (マスク済みテキスト, 対応表, 検出件数)。検出件数を対応表の
@@ -127,12 +142,17 @@ class Pipeline:
         常に空になる（`core/masker.py` の `test_redact_mode_no_mapping` が
         固定化している挙動）。そのため検出件数はこの戻り値で別途明示する。
 
+        `detections` を渡すとそのリストをマスク対象に使う（内部で再検出しない）。
+        `PreviewDialog` でユーザーが確認・編集した検出結果をそのままマスクする
+        ためのもの。`None` のときは従来どおり内部で `detect` する（後方互換）。
+
         `mapping_path` を指定し、かつ token モードで実際に対応表エントリが
         生成された場合のみ、対応表CSVをそこへ書き出す。フォルダ一括処理
         （`mask_folder`）と異なり単発呼び出しのため、検出0件時にまで
         空の対応表ファイルを作る必要はない。
         """
-        detections = self._detector.detect(text)
+        if detections is None:
+            detections = self._detector.detect(text)
         active_count = sum(1 for d in detections if d.enabled)
         m = masker or Masker(mode=self._mode)
         m.scan_existing_tokens([text])

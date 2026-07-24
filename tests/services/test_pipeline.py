@@ -387,6 +387,66 @@ def test_mask_text_with_custom_masker():
     assert tokens2 == ["【人名_2】"]
 
 
+# --- analyze_text / mask_text(detections=...) : クリップボード・プレビュー用 ---
+#
+# クリップボードのマスクにもファイルと同じ PreviewDialog を挟むため、生テキストを
+# (Fragment, 検出リスト) に分解する analyze_text と、確認・編集後の検出リストを
+# そのままマスクする mask_text(detections=...) を追加した。
+
+
+def test_analyze_text_returns_clipboard_fragment_and_detections():
+    """analyze_text が生テキストを location="clipboard" の Fragment 1つと、
+    その検出リストに分解して返す。既知の PII を含めば検出は非空になる。"""
+    pl = make_pipeline()
+    frag, dets = pl.analyze_text("山田太郎 03-1234-5678")
+    assert isinstance(frag, Fragment)
+    assert frag.location == "clipboard"
+    assert frag.text == "山田太郎 03-1234-5678"
+    cats = {d.category for d in dets}
+    assert "PERSON" in cats and "PHONE" in cats
+
+
+def test_mask_text_uses_supplied_detections_without_redetecting():
+    """detections を渡すと、内部で再検出せずそのリストだけをマスクする。
+    ここでは実在の PII を含む文章に対し、手動で作った1件だけの検出リスト
+    （文章の一部だけを指す）を渡し、その1件だけがマスクされ、本来なら自動
+    検出されるはずの他の PII（電話番号）は素通りすることを確認する
+    （＝渡したリストが尊重され、再検出が起きていないことの証明）。"""
+    pl = make_pipeline(mode="token")
+    text = "山田太郎 03-1234-5678"
+    only = [Detection(text="山田太郎", category="PERSON",
+                      start=0, end=4, source="manual")]
+    masked, table, count = pl.mask_text(text, detections=only)
+    assert count == 1
+    assert "山田太郎" not in masked
+    assert "03-1234-5678" in masked  # 再検出されていない証拠
+    assert len(table.entries) == 1
+
+
+def test_mask_text_with_all_disabled_detections_masks_nothing():
+    """無効化された検出だけを渡すと、検出0件相当でマスクは何も起きない。"""
+    pl = make_pipeline(mode="token")
+    text = "山田太郎 03-1234-5678"
+    _, dets = pl.analyze_text(text)
+    for d in dets:
+        d.enabled = False
+    masked, table, count = pl.mask_text(text, detections=dets)
+    assert count == 0
+    assert masked == text
+    assert len(table.entries) == 0
+
+
+def test_mask_text_detections_none_falls_back_to_internal_detection():
+    """detections=None（既定）のときは従来どおり内部検出でマスクする
+    （後方互換）。"""
+    pl = make_pipeline(mode="token")
+    text = "山田太郎 03-1234-5678"
+    masked, table, count = pl.mask_text(text)  # detections 未指定
+    assert count == 2
+    assert "山田太郎" not in masked
+    assert "03-1234-5678" not in masked
+
+
 # --- 再レビュー指摘: 形式別の「対象外」注記が設計書4.6の全項目を漏れなく
 #     開示すること（44bdeca時点までの回帰の修正）---
 #
