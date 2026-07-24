@@ -64,27 +64,48 @@ class Masker:
             self._value_tokens[detection.text] = entry
         return entry.token
 
+    def resolve_active_detections(
+        self, fragments: list[str], detections: list[list[Detection]]
+    ) -> list[list[Detection]]:
+        """各断片について、有効(enabled)な Detection の重複を解決した後の、
+        実際にマスク対象となる Detection 集合を返す（設計書4.2/4.3、Task 18）。
+
+        `mask_fragments()` が置換前に内部で使うのと全く同じ解決結果を、
+        実際の置換を行わずに知りたい呼び出し元向けに公開する（例:
+        `services/pipeline.py` の `Pipeline.mask_file()` が後処理レポートの
+        `category_counts` を集計する際、解決前の生の Detection をそのまま
+        数えると、重なりがtrim/破棄された分だけカウントが実態とずれる
+        ため、必ずこちらの結果を数える必要がある）。ロジックを呼び出し元
+        ごとに再実装させない（`resolve_overlaps()` の二重実装を増やさない）
+        ための共有エントリポイント。
+
+        以下の採番・置換ループはいずれも「渡された有効(enabled)な
+        Detection群は互いに重ならない」ことを前提にしている。
+        Detector.detect() が返す自動検出だけならこの前提は常に成立
+        するが、プレビュー画面での手動追加（source="manual"）は
+        Detector の重複解決を経由せずに直接追記されるため、既存の
+        自動検出と重なった状態でここへ渡ってくることがある。
+        resolve_overlaps() で置換前に必ず解決しておくことで、
+        重なったまま置換した場合に起きる文字位置ずれ（原文破壊・
+        検出漏れ・二重マスク）を防ぐ（Task 18）。既に非重複な
+        入力に対しては何も変えない（trimも破棄も発生しない）ため、
+        既存の呼び出し元の挙動には影響しない。
+        """
+        resolved: list[list[Detection]] = []
+        for frag, dets in zip(fragments, detections):
+            enabled_dets = [d for d in dets if d.enabled]
+            active = sorted(
+                resolve_overlaps(enabled_dets, frag, _ACTIVE_SOURCE_PRIORITY),
+                key=lambda d: d.start)
+            resolved.append(active)
+        return resolved
+
     def mask_fragments(
         self, fragments: list[str], detections: list[list[Detection]]
     ) -> tuple[list[str], MappingTable]:
         out: list[str] = []
-        for frag, dets in zip(fragments, detections):
-            enabled_dets = [d for d in dets if d.enabled]
-            # 以下の採番・置換ループはいずれも「渡された有効(enabled)な
-            # Detection群は互いに重ならない」ことを前提にしている。
-            # Detector.detect() が返す自動検出だけならこの前提は常に成立
-            # するが、プレビュー画面での手動追加（source="manual"）は
-            # Detector の重複解決を経由せずに直接追記されるため、既存の
-            # 自動検出と重なった状態でここへ渡ってくることがある。
-            # resolve_overlaps() で置換前に必ず解決しておくことで、
-            # 重なったまま置換した場合に起きる文字位置ずれ（原文破壊・
-            # 検出漏れ・二重マスク）を防ぐ（Task 18）。既に非重複な
-            # 入力に対しては何も変えない（trimも破棄も発生しない）ため、
-            # 既存の呼び出し元の挙動には影響しない。
-            active = sorted(
-                resolve_overlaps(enabled_dets, frag, _ACTIVE_SOURCE_PRIORITY),
-                key=lambda d: d.start)
-
+        for frag, active in zip(
+                fragments, self.resolve_active_detections(fragments, detections)):
             # 新規トークンの採番は、原文の出現順（開始位置の昇順=左から）で
             # 先に確定させる。置換そのものは後述のとおり右から（開始位置の
             # 降順で）行う必要があるが、採番の走査順と置換の走査順を同じに

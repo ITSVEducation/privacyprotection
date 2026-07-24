@@ -162,11 +162,22 @@ class Pipeline:
         _atomic_write(lambda p: handler.write_fragments(path, p, masked_frags),
                       out_path)
 
+        # category_counts は「実際にマスクされた項目」を反映しなければ
+        # ならない。渡された detections をそのまま(解決前の生の件数として)
+        # 数えると、手動追加(source="manual")が既存の自動検出と重なる
+        # ケースで水増しされる — 例えば自動検出 PERSON がある範囲を、手動で
+        # EMAIL として重ねて選んだ場合、Masker.mask_fragments() 内部では
+        # resolve_overlaps() により EMAIL 側が丸ごと破棄され実際には
+        # PERSON の1項目しかマスクされないのに、ここで生の detections を
+        # 数えると {"PERSON": 1, "EMAIL": 1} という存在しない項目のぶんまで
+        # カウントしてしまう。Masker.mask_fragments() が内部で使うのと
+        # 同じ解決結果を resolve_active_detections() 経由で取得し、それを
+        # 数えることで、レポートが実際の出力と一致するようにする。
         counts: dict[str, int] = {}
-        for dets in detections:
+        for dets in m.resolve_active_detections(
+                [f.text for f in fragments], detections):
             for d in dets:
-                if d.enabled:
-                    counts[d.category] = counts.get(d.category, 0) + 1
+                counts[d.category] = counts.get(d.category, 0) + 1
         notes = []
         if path.suffix.lower() in (".xlsx", ".docx", ".pptx"):
             notes.append("図形/テキストボックス内の文字と埋込オブジェクトは対象外です")

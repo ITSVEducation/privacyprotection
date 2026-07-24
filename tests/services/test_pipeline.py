@@ -6,7 +6,7 @@ from privacyprotection.core.detector import Detector
 from privacyprotection.core.dictionary import DictionaryDetector
 from privacyprotection.core.mapping_io import read_mapping
 from privacyprotection.core.masker import Masker
-from privacyprotection.core.models import TOKEN_RE
+from privacyprotection.core.models import TOKEN_RE, Detection, Fragment
 from privacyprotection.core.patterns import PatternDetector
 from privacyprotection.handlers.text_handler import TextHandler
 from privacyprotection.services.pipeline import Pipeline
@@ -63,6 +63,37 @@ def test_disabled_detection_respected(tmp_path):
             d.enabled = False
     out, report = pl.mask_file(src, frags, dets)
     assert out.read_text(encoding="utf-8") == "【人名_1】と佐藤花子"
+
+
+def test_mask_file_category_counts_reflect_post_overlap_resolution(tmp_path):
+    """レビュー指摘（Finding 1）の回帰テスト: 手動追加(source="manual")の
+    Detection が既存の自動検出と重なる場合、FileReport.category_counts は
+    resolve_overlaps() 適用後に実際にマスクされた項目を反映しなければならない。
+
+    渡された detections（解決前の生のリスト）をそのまま数えると、自動検出
+    "cdefgh"(PERSON, 2-8) に完全に包含される手動追加 "de"(EMAIL, 3-5) が
+    実際には（設計書4.2「完全に覆われる場合のみ丸ごと破棄」）マスク結果に
+    一切現れないにもかかわらず、{"PERSON": 1, "EMAIL": 1} という存在しない
+    EMAIL 項目まで水増しして数えてしまう。
+    """
+    text = "abcdefghij"
+    src = tmp_path / "memo.txt"
+    src.write_text(text, encoding="utf-8")
+    pl = make_pipeline()
+    frags = [Fragment(text=text, location="line:1")]
+
+    auto = Detection(text="cdefgh", category="PERSON", start=2, end=8, source="ner")
+    manual = Detection(text="de", category="EMAIL", start=3, end=5, source="manual")
+    dets = [[auto, manual]]
+
+    out, report = pl.mask_file(src, frags, dets)
+
+    # マスク結果は PERSON の1トークンのみ（EMAIL は完全に包含されるため
+    # 丸ごと破棄され、二重マスクも検出漏れも起きない）。
+    assert out.read_text(encoding="utf-8") == "ab【人名_1】ij"
+    # レポートの category_counts もそれと一致しなければならない
+    # （解決前の生の件数を数えた場合の {"PERSON": 1, "EMAIL": 1} は誤り）。
+    assert report.category_counts == {"PERSON": 1}
 
 
 def test_mask_folder_shared_tokens_and_report(tmp_path):
