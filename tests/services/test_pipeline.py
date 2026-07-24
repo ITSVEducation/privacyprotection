@@ -1,8 +1,11 @@
+import re
+
 import pytest
 from privacyprotection.config import AppConfig
 from privacyprotection.core.detector import Detector
 from privacyprotection.core.dictionary import DictionaryDetector
 from privacyprotection.core.mapping_io import read_mapping
+from privacyprotection.core.masker import Masker
 from privacyprotection.core.models import TOKEN_RE
 from privacyprotection.core.patterns import PatternDetector
 from privacyprotection.handlers.text_handler import TextHandler
@@ -181,24 +184,45 @@ def test_restore_file_preserves_unrelated_masked_substring(tmp_path):
 # Tests for Pipeline.from_config() and Pipeline.mask_text()
 
 def test_from_config_with_custom_dictionary_token_mode():
-    """from_config ファクトリが AppConfig を正しく Pipeline に組み立てることを
-    確認する。カスタム辞書エントリが実際に検出・マスクされることで、ファクトリが
-    Detector と sub-detector を正しく配線していることを証明する。"""
+    """from_config ファクトリが AppConfig.custom_dictionary を実際に
+    DictionaryDetector へ配線することを確認する。
+
+    検出対象には "PRJ-9981" という、NER（人名/組織/地名）にも定型パターン
+    （メール・電話・郵便番号等）にも該当しない、辞書がなければ一切検出され
+    得ない文字列を使う（"テスト太郎" のように NER 単体でも人名として拾われて
+    しまう語句だと、from_config がカスタム辞書の配線をまるごと落としていても
+    テストが偶然通ってしまうため不適切）。"""
     cfg = AppConfig(
-        custom_dictionary={"テスト太郎": "PERSON"},
+        custom_dictionary={"PRJ-9981": "CUSTOM"},
         mask_mode="token",
-        enabled_categories={"PERSON", "PHONE", "EMAIL"}
+        enabled_categories={"PERSON", "PHONE", "EMAIL", "CUSTOM"}
     )
     pl = Pipeline.from_config(cfg)
 
-    # マスク対象テキスト（カスタム辞書に含まれる人名）
-    text = "テスト太郎に電話してください"
+    text = "PRJ-9981の進捗を教えてください"
     masked, table, count = pl.mask_text(text)
 
     # カスタム辞書由来の検出がマスクされることを確認
-    assert "テスト太郎" not in masked
+    assert "PRJ-9981" not in masked
     assert count == 1
     assert len(table.entries) == 1
+    assert table.entries[0].original == "PRJ-9981"
+    assert table.entries[0].category == "CUSTOM"
+
+    # 陰性対照: カスタム辞書エントリを持たない Pipeline では同じ文字列は
+    # 検出されない。これにより、上の検出結果が本当に custom_dictionary の
+    # 配線に起因すること（NER/パターン検出が偶然拾ったのではないこと）を
+    # 確認する。
+    cfg_no_dict = AppConfig(
+        custom_dictionary={},
+        mask_mode="token",
+        enabled_categories={"PERSON", "PHONE", "EMAIL", "CUSTOM"}
+    )
+    pl_no_dict = Pipeline.from_config(cfg_no_dict)
+    masked_no_dict, table_no_dict, count_no_dict = pl_no_dict.mask_text(text)
+    assert "PRJ-9981" in masked_no_dict
+    assert count_no_dict == 0
+    assert len(table_no_dict.entries) == 0
 
 
 def test_mask_text_token_mode_with_pii():
@@ -297,27 +321,29 @@ def test_mask_text_redact_mode_no_pii_no_output_file(tmp_path):
 
 
 def test_mask_text_with_custom_masker():
-    """mask_text が masker 引数を受け取ったとき、それを使用することを確認する。
-    Masker インスタンスを複数の mask_text 呼び出しで共有することで、
-    「同じ PII は常に同じトークンになる」という保証が成立する。"""
-    from privacyprotection.core.masker import Masker
+    """mask_text が masker 引数を受け取ったとき、内部で新しい Masker を
+    作り直さずそれをそのまま使う（＝呼び出しをまたいでカウンタ状態が
+    共有される）ことを確認する。
 
+    2回の呼び出しで「同じ」人名をマスクするテストだと、mask_text が渡された
+    masker を無視して呼び出しごとに新しい Masker(mode="token") を作っていても
+    両方【人名_1】になり区別が付かない。そこで2回の呼び出しで「異なる」人名を
+    マスクし、採番が 1 → 2 と連続することを確認する。これは shared_masker が
+    実際に使い回されていなければ成立しない（使い回されなければ2回目も
+    【人名_1】から始まってしまう）。"""
     pl = make_pipeline(mode="token")
     shared_masker = Masker(mode="token")
 
     text1 = "山田太郎が来ました"
-    text2 = "山田太郎に聞いてください"
+    text2 = "佐藤花子に聞いてください"
 
     masked1, _, _ = pl.mask_text(text1, masker=shared_masker)
     masked2, _, _ = pl.mask_text(text2, masker=shared_masker)
 
-    # 両方で同じトークンが使われていることを確認
-    # regex で【人名_N】パターンを抽出
-    import re
     tokens1 = re.findall(r"【人名_\d+】", masked1)
     tokens2 = re.findall(r"【人名_\d+】", masked2)
 
-    assert len(tokens1) == 1
-    assert len(tokens2) == 1
-    # 同じトークンが使われている
-    assert tokens1[0] == tokens2[0]
+    # 1回目は_1、2回目は_2から始まり、カウンタが呼び出しをまたいで
+    # 引き継がれていることを確認する。
+    assert tokens1 == ["【人名_1】"]
+    assert tokens2 == ["【人名_2】"]
