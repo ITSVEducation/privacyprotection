@@ -1,4 +1,5 @@
 import pytest
+from privacyprotection.config import AppConfig
 from privacyprotection.core.detector import Detector
 from privacyprotection.core.dictionary import DictionaryDetector
 from privacyprotection.core.mapping_io import read_mapping
@@ -175,3 +176,148 @@ def test_restore_file_preserves_unrelated_masked_substring(tmp_path):
     # 語中の "_masked" を盲目的に削ると
     # "already_by_someone_else_restored.txt" のような誤ったファイル名になる。
     assert restored_path.name == "already_masked_by_someone_else_restored.txt"
+
+
+# Tests for Pipeline.from_config() and Pipeline.mask_text()
+
+def test_from_config_with_custom_dictionary_token_mode():
+    """from_config ファクトリが AppConfig を正しく Pipeline に組み立てることを
+    確認する。カスタム辞書エントリが実際に検出・マスクされることで、ファクトリが
+    Detector と sub-detector を正しく配線していることを証明する。"""
+    cfg = AppConfig(
+        custom_dictionary={"テスト太郎": "PERSON"},
+        mask_mode="token",
+        enabled_categories={"PERSON", "PHONE", "EMAIL"}
+    )
+    pl = Pipeline.from_config(cfg)
+
+    # マスク対象テキスト（カスタム辞書に含まれる人名）
+    text = "テスト太郎に電話してください"
+    masked, table, count = pl.mask_text(text)
+
+    # カスタム辞書由来の検出がマスクされることを確認
+    assert "テスト太郎" not in masked
+    assert count == 1
+    assert len(table.entries) == 1
+
+
+def test_mask_text_token_mode_with_pii():
+    """mask_text が token mode で複数の PII を検出・マスクし、正しい
+    マスク済みテキスト、対応表、検出件数を返すことを確認する。"""
+    pl = make_pipeline(mode="token")
+    text = "山田太郎 03-1234-5678"
+
+    masked, table, count = pl.mask_text(text)
+
+    # 検出件数が正確に2件（人名1件、電話1件）
+    assert count == 2
+    # マスク済みテキストが生成されている
+    assert "山田太郎" not in masked
+    assert "03-1234-5678" not in masked
+    # token mode では対応表エントリが存在する
+    assert len(table.entries) > 0
+    # マスク済みテキストに token が含まれる
+    assert "【人名_" in masked
+    assert "【電話_" in masked
+
+
+def test_mask_text_token_mode_with_mapping_path(tmp_path):
+    """mask_text が token mode で mapping_path を指定された場合、
+    対応表エントリが存在するときのみ CSV ファイルを書き出すことを確認する。"""
+    pl = make_pipeline(mode="token")
+    text = "山田太郎"
+    mapping_path = tmp_path / "test.pmap.csv"
+
+    masked, table, count = pl.mask_text(text, mapping_path=mapping_path)
+
+    # 対応表が書き出されていることを確認
+    assert mapping_path.exists()
+    assert count == 1
+    assert len(table.entries) == 1
+    # ファイルが読める形式であることを確認
+    loaded = read_mapping(mapping_path)
+    assert len(loaded.entries) == 1
+
+
+def test_mask_text_redact_mode_regression_test(tmp_path):
+    """mask_text が redact mode でも正しく検出件数を報告することを確認する。
+    これは設計上、redact mode では対応表エントリが常に空になるため、
+    「対応表が空 = 検出なし」という間違った推論をしてはならないことを
+    保証する回帰テスト。実装では検出件数を別途 active_count で返すことで
+    この区別が成立する。"""
+    pl = make_pipeline(mode="redact")
+    text = "山田太郎 03-1234-5678"
+
+    masked, table, count = pl.mask_text(text)
+
+    # redact mode ではテキストが ●●● で置き換わる
+    assert "山田太郎" not in masked
+    assert "03-1234-5678" not in masked
+    assert "●●●●" in masked
+
+    # 対応表エントリは ALWAYS 空（redact mode の仕様）
+    assert len(table.entries) == 0
+
+    # しかし検出件数は正確に報告される（非ゼロ）
+    # これが非回帰である理由：table.entries の有無から count を
+    # 推論していると、ここで count == 0 という誤った値になってしまう
+    assert count == 2
+
+
+def test_mask_text_no_pii():
+    """mask_text が PII を含まないテキストを処理するとき、
+    マスク済みテキストは元のまま、検出件数は 0 になることを確認する。"""
+    pl = make_pipeline(mode="token")
+    text = "これはPIIを含まない普通のテキストです"
+
+    masked, table, count = pl.mask_text(text)
+
+    # テキストが変わらない
+    assert masked == text
+    # 検出件数が 0
+    assert count == 0
+    # token mode でも対応表エントリは 0
+    assert len(table.entries) == 0
+
+
+def test_mask_text_redact_mode_no_pii_no_output_file(tmp_path):
+    """mask_text が redact mode で PII が全くない場合、
+    mapping_path を指定していてもファイルが作成されないことを確認する。
+    （redact mode はそもそも対応表を作成しないモードなので、
+    検出0件の場合に空の対応表ファイルを作る意味はない）"""
+    pl = make_pipeline(mode="redact")
+    text = "PII を含まないテキスト"
+    mapping_path = tmp_path / "test.pmap.csv"
+
+    masked, table, count = pl.mask_text(text, mapping_path=mapping_path)
+
+    assert count == 0
+    # redact mode ではそもそもファイルが作成されない
+    assert not mapping_path.exists()
+
+
+def test_mask_text_with_custom_masker():
+    """mask_text が masker 引数を受け取ったとき、それを使用することを確認する。
+    Masker インスタンスを複数の mask_text 呼び出しで共有することで、
+    「同じ PII は常に同じトークンになる」という保証が成立する。"""
+    from privacyprotection.core.masker import Masker
+
+    pl = make_pipeline(mode="token")
+    shared_masker = Masker(mode="token")
+
+    text1 = "山田太郎が来ました"
+    text2 = "山田太郎に聞いてください"
+
+    masked1, _, _ = pl.mask_text(text1, masker=shared_masker)
+    masked2, _, _ = pl.mask_text(text2, masker=shared_masker)
+
+    # 両方で同じトークンが使われていることを確認
+    # regex で【人名_N】パターンを抽出
+    import re
+    tokens1 = re.findall(r"【人名_\d+】", masked1)
+    tokens2 = re.findall(r"【人名_\d+】", masked2)
+
+    assert len(tokens1) == 1
+    assert len(tokens2) == 1
+    # 同じトークンが使われている
+    assert tokens1[0] == tokens2[0]
