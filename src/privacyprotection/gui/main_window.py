@@ -137,10 +137,20 @@ class MainWindow(QMainWindow):
 
     # --- 入力処理 -------------------------------------------------------
     def _handle_paths(self, paths: list[Path]):
-        if self.restore_radio.isChecked():
-            self._restore_paths(paths)
-        else:
-            self._mask_paths(paths)
+        # --windowed ビルドでは stderr が存在せず、スロット内で送出された
+        # 例外は誰にも見えないまま握りつぶされ「操作しても何も起きない」
+        # ように見える（spacy_legacy 欠落による RegistryError で実際に
+        # 発生した）。個別処理の try/except から漏れる例外（例:
+        # _build_pipeline）もここで受け、必ずダイアログとして表示する。
+        # メッセージに検出値そのものを含めない制約は例外名のみの表示で守る。
+        try:
+            if self.restore_radio.isChecked():
+                self._restore_paths(paths)
+            else:
+                self._mask_paths(paths)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "エラー", f"{type(exc).__name__}: 処理できませんでした")
 
     def _mask_paths(self, paths: list[Path]):
         pipeline = self._build_pipeline()
@@ -233,10 +243,17 @@ class MainWindow(QMainWindow):
         # クリップボードボタンはモード切替ラジオボタンに連動する
         # （Finding 3）: マスクモードでは従来通りマスク、復元モードでは
         # 復元を行う。
-        if self.restore_radio.isChecked():
-            self._restore_clipboard()
-        else:
-            self._mask_clipboard()
+        # _handle_paths と同じ理由で、スロット全体を try/except で包み
+        # 例外を必ずダイアログとして表示する（_mask_clipboard には
+        # 従来 try/except がなく、--windowed ビルドで無言死していた）。
+        try:
+            if self.restore_radio.isChecked():
+                self._restore_clipboard()
+            else:
+                self._mask_clipboard()
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "エラー", f"{type(exc).__name__}: 処理できませんでした")
 
     def _update_clipboard_button_label(self):
         if self.restore_radio.isChecked():
