@@ -387,7 +387,8 @@ def test_mask_text_with_custom_masker():
     assert tokens2 == ["【人名_2】"]
 
 
-# --- Finding 1 (最終レビュー): 形式別の「対象外」注記が実態と一致すること ---
+# --- 再レビュー指摘: 形式別の「対象外」注記が設計書4.6の全項目を漏れなく
+#     開示すること（44bdeca時点までの回帰の修正）---
 #
 # 以前は全Office形式に対して一律
 # 「図形/テキストボックス内の文字と埋込オブジェクトは対象外です」という
@@ -398,10 +399,14 @@ def test_mask_text_with_custom_masker():
 #     一切触れていなかった。
 #   - .xlsx は数式内の文字列リテラル・定義名を対象外としているのに、注記は
 #     それに一切触れていなかった。
-# 以下は、各形式のFileReportに実態どおりの注記が付く（あるいは.pptx/.txtの
-# ように付かない）ことを固定する回帰テスト。
+# その直後の修正（前回ラウンド）でこれらの新事実は注記に追加されたが、今度は
+# 設計書4.6の表がもともと要求していたテキストボックス/図形内文字・埋込画像・
+# 埋込オブジェクト等の開示を丸ごと落としてしまう回帰を起こした（再レビュー
+# 指摘）。以下は、新旧どちらの開示も欠落なく含む注記が各形式のFileReportに
+# 付く（.pptxはシェイプテキストの虚偽claimなしに、埋込画像/埋込オブジェクト/
+# スライドマスターのみ付く）ことを固定する回帰テスト。
 
-def test_docx_report_notes_footnote_endnote_comment_exclusion(tmp_path):
+def test_docx_report_notes_full_46_exclusion_list(tmp_path):
     d = docx.Document()
     d.add_paragraph("担当: 山田太郎")
     src = tmp_path / "memo.docx"
@@ -409,10 +414,13 @@ def test_docx_report_notes_footnote_endnote_comment_exclusion(tmp_path):
     pl = make_pipeline()
     frags, dets = pl.analyze_file(src)
     _, report = pl.mask_file(src, frags, dets)
-    assert report.notes == ["脚注・文末脚注・コメントは対象外です"]
+    assert report.notes == [
+        "テキストボックス/図形内文字・埋込画像・埋込オブジェクト・"
+        "変更履歴の削除済みテキスト・脚注/文末脚注/コメントは対象外です"
+    ]
 
 
-def test_xlsx_report_notes_formula_literal_and_defined_name_exclusion(tmp_path):
+def test_xlsx_report_notes_full_46_exclusion_list(tmp_path):
     wb = openpyxl.Workbook()
     ws = wb.active
     ws["A1"] = "山田太郎"
@@ -421,10 +429,13 @@ def test_xlsx_report_notes_formula_literal_and_defined_name_exclusion(tmp_path):
     pl = make_pipeline()
     frags, dets = pl.analyze_file(src)
     _, report = pl.mask_file(src, frags, dets)
-    assert report.notes == ["数式内の文字列リテラルと定義名は対象外です"]
+    assert report.notes == [
+        "図形/テキストボックス内文字・埋込画像・埋込オブジェクト・"
+        "ピボットキャッシュ・数式内の文字列リテラル・定義名は対象外です"
+    ]
 
 
-def test_pptx_report_has_no_false_exclusion_note(tmp_path):
+def test_pptx_report_notes_embedded_object_and_slide_master_only(tmp_path):
     prs = Presentation()
     slide = prs.slides.add_slide(prs.slide_layouts[5])
     slide.shapes.title.text = "山田太郎の報告"
@@ -433,9 +444,10 @@ def test_pptx_report_has_no_false_exclusion_note(tmp_path):
     pl = make_pipeline()
     frags, dets = pl.analyze_file(src)
     _, report = pl.mask_file(src, frags, dets)
-    # シェイプテキストは実際にPptxHandlerがマスクしているため、
-    # 「対象外」を示す注記は一切付かないこと。
-    assert report.notes == []
+    # シェイプテキストは実際にPptxHandlerがマスクしているため、それについての
+    # 「対象外」claimは付かない。一方で埋込画像・埋込オブジェクト・
+    # スライドマスターは設計書4.6の表どおり本当に対象外なので、注記は付く。
+    assert report.notes == ["埋込画像・埋込オブジェクト・スライドマスターは対象外です"]
 
 
 def test_plain_text_report_has_no_office_specific_note(tmp_path):

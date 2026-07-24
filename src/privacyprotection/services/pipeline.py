@@ -26,14 +26,30 @@ from .report import BatchReport, FileReport
 # 二重実装しないための共有。services→handlers という既存の依存方向のまま
 # importできる（handlers→servicesは禁止だが、逆方向は問題ない）。
 
-# 各Office形式について、実際にHandlerが対象外にしている範囲を正確に伝える注記
-# （設計書4.6「対象外の箇所は処理後レポートに注記として常に表示する」）。
-# .pptx は notes に含めない — 図形テキスト（グループ化されたシェイプを含む）・
-# 表・スピーカーノートはすべて PptxHandler が実際にマスクしており、対象外の
-# 箇所はない（handlers/pptx_handler.py で確認済み）。ここに存在しない注記を
-# 書くと「マスクされていない」という誤った印象を与えてしまう。
-_DOCX_EXCLUSION_NOTE = "脚注・文末脚注・コメントは対象外です"
-_XLSX_EXCLUSION_NOTE = "数式内の文字列リテラルと定義名は対象外です"
+# 各Office形式について、実際にHandlerが対象外にしている範囲を漏れなく伝える注記
+# （設計書4.6「対象外の箇所は処理後レポートに注記として常に表示する」。同章の
+# 表に列挙された形式別の対象外項目が、そのままここでの注記内容の根拠）。
+#
+# 再レビューで判明した回帰（Finding, 44bdeca以前）: 前回の修正は「数式内
+# リテラル/定義名」(xlsx)・「脚注/文末脚注/コメント」(docx) という新たに
+# 判明した対象外事項を注記に追加した際、設計書4.6が元々要求していた
+# テキストボックス/図形内文字・埋込画像・埋込オブジェクト等の開示を誤って
+# 削り落としてしまっていた。以下は新旧どちらの開示も欠落なく含む。
+#
+# .pptx は「シェイプ内テキスト（グループ化されたシェイプを含む）が対象外」
+# という虚偽の注記だけは付けない — 表・スピーカーノートを含め実際に
+# PptxHandler がマスクしているため（handlers/pptx_handler.py で確認済み）。
+# ただし4.6の表が挙げる埋込画像・埋込オブジェクト・スライドマスターは
+# PptxHandler が対象にしていない実際の欠落なので、pptx にも注記を付ける。
+_DOCX_EXCLUSION_NOTE = (
+    "テキストボックス/図形内文字・埋込画像・埋込オブジェクト・"
+    "変更履歴の削除済みテキスト・脚注/文末脚注/コメントは対象外です"
+)
+_XLSX_EXCLUSION_NOTE = (
+    "図形/テキストボックス内文字・埋込画像・埋込オブジェクト・"
+    "ピボットキャッシュ・数式内の文字列リテラル・定義名は対象外です"
+)
+_PPTX_EXCLUSION_NOTE = "埋込画像・埋込オブジェクト・スライドマスターは対象外です"
 
 
 def _numbered_output(directory: Path, stem: str, suffix: str) -> Path:
@@ -190,8 +206,9 @@ class Pipeline:
             notes.append(_DOCX_EXCLUSION_NOTE)
         elif suffix == ".xlsx":
             notes.append(_XLSX_EXCLUSION_NOTE)
-        # .pptx・.txt系はいずれも注記を追加しない（前者はHandlerが全範囲を
-        # マスクしているため、後者はそもそもOffice固有の対象外範囲がないため）。
+        elif suffix == ".pptx":
+            notes.append(_PPTX_EXCLUSION_NOTE)
+        # .txt系には注記を追加しない（そもそもOffice固有の対象外範囲がないため）。
         return out_path, FileReport(path=path, category_counts=counts, notes=notes)
 
     def mask_folder(self, root: Path, out_dir: Path | None = None,
