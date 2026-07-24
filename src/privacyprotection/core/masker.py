@@ -53,7 +53,12 @@ class Masker:
     def _token_for(self, detection: Detection) -> str:
         entry = self._value_tokens.get(detection.text)
         if entry is None:
-            label = CATEGORY_LABELS[detection.category]
+            # 手編集のconfig.jsonのカスタム辞書が固定10種以外のカテゴリを
+            # 持っていてもKeyErrorで落ちないよう、未知のカテゴリはラベルの
+            # 代わりに生のカテゴリ文字列をトークンラベルとして使う
+            # （Finding 7。config.py の export_dictionary_csv と同じ
+            # フォールバック方針）。
+            label = CATEGORY_LABELS.get(detection.category, detection.category)
             self._counters[label] += 1
             entry = MappingEntry(
                 token=f"【{label}_{self._counters[label]}】",

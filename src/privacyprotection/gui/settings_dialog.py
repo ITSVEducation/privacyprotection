@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import AppConfig, export_dictionary_csv, import_dictionary_csv
-from ..core.models import CATEGORY_LABELS
+from ..core.models import CATEGORY_LABELS, LABEL_TO_CATEGORY
 
 # カテゴリ ON/OFF トグルの対象。CUSTOM はここに含めない — CUSTOM は自動検出器
 # (pattern/ner) が生成することのないカテゴリで、専らカスタム辞書由来にしか
@@ -27,20 +27,15 @@ from ..core.models import CATEGORY_LABELS
 _TOGGLE_CATEGORIES = ["PERSON", "ORG", "LOC", "PHONE", "EMAIL",
                       "ADDRESS", "POSTAL", "MYNUMBER", "CREDITCARD"]
 
-_LABEL_TO_CATEGORY: dict[str, str] = {}
-for cat, label in CATEGORY_LABELS.items():
-    _LABEL_TO_CATEGORY.setdefault(label, cat)
-
 # カスタム辞書テーブルの「種別」列で選べる選択肢（ラベル単位で重複排除）。
 # POSTAL/MYNUMBER/CREDITCARD は全て日本語ラベル「番号」を共有しているため、
-# 選択肢としては「番号」を1つだけ出し、選ぶと上の _LABEL_TO_CATEGORY による
-# 代表カテゴリ（宣言順で最初に出てくるもの＝POSTAL）に解決される。この
-# 「ラベル単位で重複排除し代表カテゴリに解決する」規則は
-# `core/mapping_io.py`(`_LABEL_TO_CATEGORY`) や
-# `gui/preview_dialog.py`(`_representative_categories()`) と同じ、既存の
-# 割り切り（Task 16レビューで承認済み）であり、ここで新たに導入したもの
-# ではない。
-_CATEGORY_LABEL_CHOICES = sorted(_LABEL_TO_CATEGORY)
+# 選択肢としては「番号」を1つだけ出し、選ぶと core/models.py の
+# LABEL_TO_CATEGORY による代表カテゴリ（宣言順で最初に出てくるもの＝
+# POSTAL）に解決される。この「ラベル単位で重複排除し代表カテゴリに解決する」
+# 規則は `core/mapping_io.py` や `gui/preview_dialog.py` と共有の、既存の
+# 割り切り（Task 16レビューで承認済み、最終レビュー Finding 6 で
+# core/models.py へ一本化）であり、ここで新たに導入したものではない。
+_CATEGORY_LABEL_CHOICES = sorted(LABEL_TO_CATEGORY)
 
 
 class SettingsDialog(QDialog):
@@ -72,7 +67,12 @@ class SettingsDialog(QDialog):
         self.table = QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(["語句", "種別"])
         for word, dict_cat in config.custom_dictionary.items():
-            self._append_row(word, CATEGORY_LABELS[dict_cat])
+            # 手編集のconfig.jsonが固定10種以外のカテゴリを持っていても
+            # ここでKeyErrorにせず、コンボボックス側で「カスタム」に
+            # フォールバックさせる（Finding 7。フォールバック先の文字列は
+            # _CATEGORY_LABEL_CHOICES に存在しないため、_append_row内の
+            # findText()が-1を返し、既定の「カスタム」選択になる）。
+            self._append_row(word, CATEGORY_LABELS.get(dict_cat, dict_cat))
         dict_layout.addWidget(self.table)
         btn_row = QHBoxLayout()
         for label, fn in [("行を追加", self._add_row),
@@ -97,7 +97,7 @@ class SettingsDialog(QDialog):
         # 種別列は自由記述ではなく固定語彙からのプルダウン選択にする
         # （Task 19 調査2）。自由記述だと、有効な種別ラベルを知らないと
         # 何を入力すればよいか分からず（発見しづらい）、かつ打ち間違い
-        # （例:「人明」）が `_LABEL_TO_CATEGORY.get(label, "CUSTOM")` に
+        # （例:「人明」）が `LABEL_TO_CATEGORY.get(label, "CUSTOM")` に
         # より無警告のまま「カスタム」へ化けてしまい、ユーザーが意図した
         # 種別と違うものに黙って変わっても気づけない。QComboBoxにすることで
         # 無効な入力自体を構造的に不可能にする。
@@ -136,7 +136,7 @@ class SettingsDialog(QDialog):
             combo = self.table.cellWidget(r, 1)
             if word_item and word_item.text():
                 label = combo.currentText() if combo is not None else "カスタム"
-                result[word_item.text()] = _LABEL_TO_CATEGORY.get(label, "CUSTOM")
+                result[word_item.text()] = LABEL_TO_CATEGORY.get(label, "CUSTOM")
         return result
 
     def _on_accept(self) -> None:

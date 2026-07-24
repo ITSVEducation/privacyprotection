@@ -39,10 +39,8 @@ class TextHandler(FileHandler):
         enc = self.detect_encoding(path)
         # newline を変換しないよう bytes からデコード（改行コード維持）
         text = path.read_bytes().decode(enc)
-        frag = Fragment(text=text, location="text")
-        frag.encoding = enc  # write時に使う付加情報
-        return [frag]
+        return [Fragment(text=text, location="text", encoding=enc)]
 
     def write_fragments(self, src: Path, dst: Path, masked: list[Fragment]) -> None:
-        enc = getattr(masked[0], "encoding", None) or self.detect_encoding(src)
+        enc = masked[0].encoding or self.detect_encoding(src)
         dst.write_bytes(masked[0].text.encode(enc))

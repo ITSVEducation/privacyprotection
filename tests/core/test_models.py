@@ -1,5 +1,5 @@
 from privacyprotection.core.models import (
-    CATEGORY_LABELS, TOKEN_RE, Detection, Fragment,
+    CATEGORY_LABELS, LABEL_TO_CATEGORY, TOKEN_RE, Detection, Fragment,
     MappingEntry, MappingTable, RestoreResult,
 )
 
@@ -31,3 +31,30 @@ def test_mapping_table_lookup():
     assert t.original_for("【人名_1】") == "山田太郎"
     assert t.token_for("不明") is None
     assert t.original_for("【人名_9】") is None
+
+
+# --- 最終レビュー Finding 6: LABEL_TO_CATEGORY の一本化 ---
+
+def test_label_to_category_covers_every_label():
+    assert set(LABEL_TO_CATEGORY) == set(CATEGORY_LABELS.values())
+
+def test_label_to_category_first_wins_for_shared_label():
+    # POSTAL/MYNUMBER/CREDITCARDはすべて「番号」ラベルを共有する。
+    # CATEGORY_LABELSの宣言順で最初に出てくるPOSTALが代表として選ばれる
+    # （"先勝ち"）ことを固定する。config.py・core/mapping_io.py・
+    # gui/settings_dialog.py・gui/preview_dialog.py がそれぞれ独自に
+    # 複製していたのと同じ規則を、ここで一本化して検証する。
+    assert LABEL_TO_CATEGORY["番号"] == "POSTAL"
+    assert LABEL_TO_CATEGORY["人名"] == "PERSON"
+    assert LABEL_TO_CATEGORY["カスタム"] == "CUSTOM"
+
+
+# --- Fragment.encoding を正式なdataclassフィールドとして宣言 ---
+
+def test_fragment_encoding_defaults_to_none():
+    f = Fragment(text="山田太郎", location="text")
+    assert f.encoding is None
+
+def test_fragment_encoding_can_be_set_via_constructor():
+    f = Fragment(text="山田太郎", location="text", encoding="cp932")
+    assert f.encoding == "cp932"

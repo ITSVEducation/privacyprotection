@@ -32,8 +32,12 @@ class BatchReport:
             if f.error is not None:
                 lines.append(f"[エラー] {f.path.name}: {f.error}")
                 continue
+            # 手編集のconfig.jsonに由来する固定10種以外のカテゴリ（Finding 7）
+            # でもKeyErrorで落ちないよう、未知のカテゴリはラベルの代わりに
+            # 生のカテゴリ文字列を表示する（config.py の export_dictionary_csv
+            # と同じフォールバック方針）。
             counts = "、".join(
-                f"{CATEGORY_LABELS[c]}: {n}" for c, n in sorted(f.category_counts.items())
+                f"{CATEGORY_LABELS.get(c, c)}: {n}" for c, n in sorted(f.category_counts.items())
             ) or "検出なし"
             warn = " ⚠ 検出0件（検出漏れの可能性があります。内容を確認してください）" \
                 if f.total() == 0 else ""

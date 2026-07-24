@@ -7,11 +7,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .core.models import CATEGORY_LABELS
-
-_LABEL_TO_CATEGORY = {}
-for cat, label in CATEGORY_LABELS.items():
-    _LABEL_TO_CATEGORY.setdefault(label, cat)
+from .core.models import CATEGORY_LABELS, LABEL_TO_CATEGORY
 
 ALL_CATEGORIES = set(CATEGORY_LABELS)
 
@@ -69,7 +65,7 @@ def import_dictionary_csv(path: Path) -> tuple[dict[str, str], list[str]]:
             if not row or not row[0]:
                 continue
             word = row[0]
-            category = _LABEL_TO_CATEGORY.get(row[1] if len(row) > 1 else "", "CUSTOM")
+            category = LABEL_TO_CATEGORY.get(row[1] if len(row) > 1 else "", "CUSTOM")
             if word in result:
                 warnings.append(f"重複語句をスキップしました: {word}")
                 continue

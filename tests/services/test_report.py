@@ -26,3 +26,13 @@ def test_render_text_contains_counts_warnings_and_no_values():
     assert "⚠ 検出0件" in text and "b.txt" in text
     assert "c.pdf" in text and "未対応の拡張子" in text
     assert "図形内テキストは対象外です" in text
+
+
+def test_render_text_falls_back_to_raw_category_when_out_of_vocabulary():
+    """最終レビュー Finding 7: 手編集のconfig.jsonのカスタム辞書由来の
+    category_countsに固定10種以外のキー（例:"WEIRD"）が入っていても、
+    render_text がKeyErrorで落ちず、ラベルの代わりに生のカテゴリ文字列を
+    表示すること。"""
+    br = BatchReport(files=[FileReport(Path("a.txt"), {"WEIRD": 1}, [])])
+    text = br.render_text()
+    assert "WEIRD: 1" in text

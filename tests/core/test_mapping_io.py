@@ -28,6 +28,22 @@ def test_read_rejects_wrong_header(tmp_path):
     with pytest.raises(ValueError):
         read_mapping(p)
 
+def test_write_mapping_falls_back_to_raw_category_when_out_of_vocabulary(tmp_path):
+    """最終レビュー Finding 7: 手編集のconfig.jsonのカスタム辞書が固定10種
+    以外のカテゴリ(例:"WEIRD")を持つエントリでもwrite_mappingがKeyErrorで
+    落ちないこと。read_mapping側は既存仕様どおり未知ラベルを"CUSTOM"に
+    落とすため、安全に(情報を失いつつも)往復できることを確認する。"""
+    table = MappingTable(entries=[
+        MappingEntry("【WEIRD_1】", "謎の値", "WEIRD", 1),
+    ])
+    p = tmp_path / "weird.pmap.csv"
+    write_mapping(table, p)
+    assert "WEIRD" in p.read_text(encoding="utf-8-sig")
+    loaded = read_mapping(p)
+    assert loaded.entries[0].category == "CUSTOM"
+    assert loaded.entries[0].original == "謎の値"
+
+
 def test_read_rejects_duplicate_token(tmp_path):
     # 2つの独立した対応表をマージした場合などに、同一トークンが異なる元の値を
     # 指す状態になり得る（Restorer が誤ったPIIを復元する重大なリスク）。

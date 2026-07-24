@@ -150,6 +150,17 @@ def test_manual_detection_containing_auto_detection_wins_by_length():
     assert [(e.category, e.original) for e in table.entries] == [("PERSON", "cdefgh")]
 
 
+def test_token_for_falls_back_to_raw_category_when_out_of_vocabulary():
+    """最終レビュー Finding 7: 手編集のconfig.jsonのカスタム辞書が固定10種
+    以外のカテゴリ（例:"WEIRD"）を持っていても、_token_for がKeyErrorで
+    落ちず、ラベルの代わりに生のカテゴリ文字列にフォールバックすること。"""
+    m = Masker(mode="token")
+    d = det("謎の値", "WEIRD", 0)
+    out, table = m.mask_fragments(["謎の値"], [[d]])
+    assert out == ["【WEIRD_1】"]
+    assert table.entries[0].category == "WEIRD"
+
+
 def test_already_non_overlapping_detections_unaffected_by_overlap_resolution():
     # 重ならない通常のケース（手動追加が無関係の位置にある場合）では、
     # 重複解決の追加が既存の挙動に影響しないことを確認する回帰テスト。

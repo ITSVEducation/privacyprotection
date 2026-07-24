@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QMenu, QMessageBox, QSplitter, QTextEdit, QVBoxLayout,
 )
 
-from ..core.models import CATEGORY_LABELS, Detection
+from ..core.models import CATEGORY_LABELS, LABEL_TO_CATEGORY, Detection
 
 _CATEGORY_COLORS = {
     "PERSON": "#ffd0d0", "ORG": "#d0e0ff", "LOC": "#d0ffd0",
@@ -24,21 +24,17 @@ _CATEGORY_COLORS = {
     "POSTAL": "#f0e0d0", "MYNUMBER": "#f0e0d0", "CREDITCARD": "#f0e0d0",
     "CUSTOM": "#e0e0e0",
 }
+_DEFAULT_CATEGORY_COLOR = _CATEGORY_COLORS["CUSTOM"]
 
 # ラベルが重複するカテゴリ（POSTAL/MYNUMBER/CREDITCARD は全て「番号」）が
 # 手動追加メニューに複数現れると、ユーザーには見分けの付かない同一の
 # メニュー項目が並ぶだけになる（Task 18 調査3）。かつ
-# `core/mapping_io.py` の `_LABEL_TO_CATEGORY` が既に「同じラベルの
+# core/models.py の `LABEL_TO_CATEGORY` が既に「同じラベルの
 # カテゴリはCATEGORY_LABELS宣言順で最初に出てきたものを代表として扱う」
 # という割り切りを採用している（Task 16 レビューで既知・許容済みの
-# 割り切り）ため、手動追加メニューでも同じ代表選びの規則に揃える。
-# これにより「メニューでどれを選んでも復元時の代表カテゴリと一致する」
-# 一貫性が保てる。
-def _representative_categories() -> dict[str, str]:
-    label_to_category: dict[str, str] = {}
-    for category, label in CATEGORY_LABELS.items():
-        label_to_category.setdefault(label, category)
-    return label_to_category
+# 割り切り、最終レビュー Finding 6 で core/models.py へ一本化）ため、
+# 手動追加メニューでも同じ代表選びの規則に揃える。これにより「メニューで
+# どれを選んでも復元時の代表カテゴリと一致する」一貫性が保てる。
 
 
 class PreviewDialog(QDialog):
@@ -91,14 +87,18 @@ class PreviewDialog(QDialog):
         for fi, dets in enumerate(self.detections):
             for d in dets:
                 item = QListWidgetItem(
-                    f"[{CATEGORY_LABELS[d.category]}] {d.text}")
+                    f"[{CATEGORY_LABELS.get(d.category, d.category)}] {d.text}")
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                 item.setCheckState(Qt.Checked if d.enabled else Qt.Unchecked)
                 item.setData(Qt.UserRole, (fi, d))
                 self.list_view.addItem(item)
                 if d.enabled:
                     fmt = QTextCharFormat()
-                    fmt.setBackground(QColor(_CATEGORY_COLORS[d.category]))
+                    # 手編集のconfig.jsonに由来する固定10種以外のカテゴリ
+                    # （Finding 7）でもKeyErrorで落ちないよう、色が定義されて
+                    # いなければCUSTOMと同じ色にフォールバックする。
+                    fmt.setBackground(QColor(
+                        _CATEGORY_COLORS.get(d.category, _DEFAULT_CATEGORY_COLOR)))
                     cursor.setPosition(self._offsets[fi] + d.start)
                     cursor.setPosition(self._offsets[fi] + d.end,
                                        QTextCursor.KeepAnchor)
@@ -118,7 +118,7 @@ class PreviewDialog(QDialog):
         menu = QMenu(self)
         # ラベル単位で重複排除した代表カテゴリ1つにつき1メニュー項目を出す
         # （調査3: POSTAL/MYNUMBER/CREDITCARDが同じ「番号」で3つ並ぶのを防ぐ）。
-        for label, category in sorted(_representative_categories().items()):
+        for label, category in sorted(LABEL_TO_CATEGORY.items()):
             action = QAction(f"「{selected}」を{label}として追加", menu)
             action.triggered.connect(
                 lambda _=False, c=category: self._add_manual(cursor, c))
@@ -164,7 +164,7 @@ class PreviewDialog(QDialog):
                     if overlap is not None:
                         QMessageBox.information(
                             self, "既存の検出と重複しています",
-                            f"選択範囲は既存の検出「[{CATEGORY_LABELS[overlap.category]}] "
+                            f"選択範囲は既存の検出「[{CATEGORY_LABELS.get(overlap.category, overlap.category)}] "
                             f"{overlap.text}」と重なっています。マスク実行時に、"
                             "範囲が広い方（同じ範囲なら今回の手動追加）が優先され、"
                             "重複しない部分は自動的に解決されます。")
