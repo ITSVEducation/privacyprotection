@@ -1,6 +1,9 @@
 import re
 
+import docx
+import openpyxl
 import pytest
+from pptx import Presentation
 from privacyprotection.config import AppConfig
 from privacyprotection.core.detector import Detector
 from privacyprotection.core.dictionary import DictionaryDetector
@@ -378,3 +381,63 @@ def test_mask_text_with_custom_masker():
     # 引き継がれていることを確認する。
     assert tokens1 == ["【人名_1】"]
     assert tokens2 == ["【人名_2】"]
+
+
+# --- Finding 1 (最終レビュー): 形式別の「対象外」注記が実態と一致すること ---
+#
+# 以前は全Office形式に対して一律
+# 「図形/テキストボックス内の文字と埋込オブジェクトは対象外です」という
+# 注記を付けていたが、これは実態と食い違っていた:
+#   - .pptx はシェイプ内テキスト（グループ化されたシェイプ含む）を実際に
+#     マスクしており、注記は虚偽だった。
+#   - .docx は脚注・文末脚注・コメントを対象外としているのに、注記はそれに
+#     一切触れていなかった。
+#   - .xlsx は数式内の文字列リテラル・定義名を対象外としているのに、注記は
+#     それに一切触れていなかった。
+# 以下は、各形式のFileReportに実態どおりの注記が付く（あるいは.pptx/.txtの
+# ように付かない）ことを固定する回帰テスト。
+
+def test_docx_report_notes_footnote_endnote_comment_exclusion(tmp_path):
+    d = docx.Document()
+    d.add_paragraph("担当: 山田太郎")
+    src = tmp_path / "memo.docx"
+    d.save(src)
+    pl = make_pipeline()
+    frags, dets = pl.analyze_file(src)
+    _, report = pl.mask_file(src, frags, dets)
+    assert report.notes == ["脚注・文末脚注・コメントは対象外です"]
+
+
+def test_xlsx_report_notes_formula_literal_and_defined_name_exclusion(tmp_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["A1"] = "山田太郎"
+    src = tmp_path / "book.xlsx"
+    wb.save(src)
+    pl = make_pipeline()
+    frags, dets = pl.analyze_file(src)
+    _, report = pl.mask_file(src, frags, dets)
+    assert report.notes == ["数式内の文字列リテラルと定義名は対象外です"]
+
+
+def test_pptx_report_has_no_false_exclusion_note(tmp_path):
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[5])
+    slide.shapes.title.text = "山田太郎の報告"
+    src = tmp_path / "deck.pptx"
+    prs.save(src)
+    pl = make_pipeline()
+    frags, dets = pl.analyze_file(src)
+    _, report = pl.mask_file(src, frags, dets)
+    # シェイプテキストは実際にPptxHandlerがマスクしているため、
+    # 「対象外」を示す注記は一切付かないこと。
+    assert report.notes == []
+
+
+def test_plain_text_report_has_no_office_specific_note(tmp_path):
+    src = tmp_path / "memo.txt"
+    src.write_text("山田太郎", encoding="utf-8")
+    pl = make_pipeline()
+    frags, dets = pl.analyze_file(src)
+    _, report = pl.mask_file(src, frags, dets)
+    assert report.notes == []

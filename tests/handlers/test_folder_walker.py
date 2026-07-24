@@ -23,6 +23,7 @@ def test_walk_collects_supported_and_skips(tmp_path):
     (tmp_path / "c.pdf").write_bytes(b"x")            # 未対応
     (tmp_path / "~$lock.docx").write_bytes(b"x")      # Officeロックファイル
     (tmp_path / "d_masked.txt").write_text("x")       # 既存出力
+    (tmp_path / "d_masked(2).txt").write_text("x")    # 既存出力(連番付き)
     (tmp_path / "e.pmap.csv").write_text("x")         # 対応表
     (tmp_path / "_report.txt").write_text("x")        # レポート
     r = walk(tmp_path)
@@ -31,6 +32,28 @@ def test_walk_collects_supported_and_skips(tmp_path):
     skipped_names = {p.name for p, _ in r.skipped}
     assert "c.pdf" in skipped_names
     assert "~$lock.docx" in skipped_names
+
+
+def test_walk_does_not_skip_file_with_masked_substring_not_at_suffix(tmp_path):
+    """最終レビュー Finding 8: "_masked" の部分一致ではなく、本アプリが
+    実際に付与する末尾サフィックス（"_masked"/"_masked(N)"）のみを本アプリの
+    出力として除外する。語幹の途中や先頭に偶然 "_masked" を含むだけの、
+    本アプリ由来でない正当なユーザーファイルは、除外されず通常どおり
+    supported に含まれる(services/pipeline.py の _restored_stem と同じ
+    アンカー付き正規表現を再利用したことの回帰テスト)。"""
+    (tmp_path / "already_masked_by_someone_else.txt").write_text("x")
+    r = walk(tmp_path)
+    names = {p.name for p in r.supported}
+    assert "already_masked_by_someone_else.txt" in names
+    skipped_names = {p.name for p, _ in r.skipped}
+    assert "already_masked_by_someone_else.txt" not in skipped_names
+
+
+def test_walk_still_skips_actual_masked_suffix_variants(tmp_path):
+    (tmp_path / "report_masked.txt").write_text("x")
+    (tmp_path / "report_masked(3).txt").write_text("x")
+    r = walk(tmp_path)
+    assert r.supported == []
 
 
 def test_walk_skips_windows_hidden_and_system_file(tmp_path):

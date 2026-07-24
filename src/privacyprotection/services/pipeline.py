@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import re
 import tempfile
 from pathlib import Path
 from typing import Callable
@@ -16,17 +15,25 @@ from ..core.models import Detection, Fragment, MappingTable, RestoreResult
 from ..core.ner import NerDetector
 from ..core.patterns import PatternDetector
 from ..core.restorer import Restorer
-from ..handlers.folder_walker import walk
+from ..handlers.folder_walker import MASKED_STEM_RE, MASKED_SUFFIX, walk
 from ..handlers.registry import get_handler
 from .report import BatchReport, FileReport
 
-MASKED_SUFFIX = "_masked"
+# MASKED_SUFFIX/MASKED_STEM_RE は handlers/folder_walker.py で定義されている
+# （最終レビュー Finding 8）。folder_walker._is_own_output() がフォルダ一括
+# 処理時に自アプリの出力を見分けるのに使うのと、ここ(mask_file/restore_file)
+# が実際に出力名を組み立て/復元するのとで、同じ「自アプリの命名規則」を
+# 二重実装しないための共有。services→handlers という既存の依存方向のまま
+# importできる（handlers→servicesは禁止だが、逆方向は問題ない）。
 
-# mask_file が付与する連番付きサフィックス（"_masked" または "_masked(N)"）を
-# 語幹の「末尾」からのみ取り除くためのパターン。単純な str.replace() は
-# 語幹の途中に偶然 "_masked" を含む名前（本アプリ由来でないファイル、例:
-# "already_masked_by_someone_else.txt"）まで壊してしまうため使わない。
-_MASKED_STEM_RE = re.compile(r"^(?P<base>.*)" + re.escape(MASKED_SUFFIX) + r"(?:\(\d+\))?$")
+# 各Office形式について、実際にHandlerが対象外にしている範囲を正確に伝える注記
+# （設計書4.6「対象外の箇所は処理後レポートに注記として常に表示する」）。
+# .pptx は notes に含めない — 図形テキスト（グループ化されたシェイプを含む）・
+# 表・スピーカーノートはすべて PptxHandler が実際にマスクしており、対象外の
+# 箇所はない（handlers/pptx_handler.py で確認済み）。ここに存在しない注記を
+# 書くと「マスクされていない」という誤った印象を与えてしまう。
+_DOCX_EXCLUSION_NOTE = "脚注・文末脚注・コメントは対象外です"
+_XLSX_EXCLUSION_NOTE = "数式内の文字列リテラルと定義名は対象外です"
 
 
 def _numbered_output(directory: Path, stem: str, suffix: str) -> Path:
@@ -45,7 +52,7 @@ def _restored_stem(masked_stem: str) -> str:
     サフィックスとして認識できない場合（本アプリ由来のファイルでない等）は、
     語幹をそのまま返す＝勝手に別の部分文字列を削らない。
     """
-    m = _MASKED_STEM_RE.match(masked_stem)
+    m = MASKED_STEM_RE.match(masked_stem)
     return m.group("base") if m else masked_stem
 
 
@@ -142,11 +149,10 @@ class Pipeline:
         m.scan_existing_tokens([f.text for f in fragments])
         masked_texts, table = m.mask_fragments(
             [f.text for f in fragments], detections)
-        masked_frags = []
-        for frag, text in zip(fragments, masked_texts):
-            frag_copy = Fragment(text=text, location=frag.location)
-            frag_copy.encoding = getattr(frag, "encoding", None)
-            masked_frags.append(frag_copy)
+        masked_frags = [
+            Fragment(text=text, location=frag.location, encoding=frag.encoding)
+            for frag, text in zip(fragments, masked_texts)
+        ]
 
         directory = out_dir or path.parent
         out_path = _numbered_output(directory, path.stem, path.suffix)
@@ -179,8 +185,13 @@ class Pipeline:
             for d in dets:
                 counts[d.category] = counts.get(d.category, 0) + 1
         notes = []
-        if path.suffix.lower() in (".xlsx", ".docx", ".pptx"):
-            notes.append("図形/テキストボックス内の文字と埋込オブジェクトは対象外です")
+        suffix = path.suffix.lower()
+        if suffix == ".docx":
+            notes.append(_DOCX_EXCLUSION_NOTE)
+        elif suffix == ".xlsx":
+            notes.append(_XLSX_EXCLUSION_NOTE)
+        # .pptx・.txt系はいずれも注記を追加しない（前者はHandlerが全範囲を
+        # マスクしているため、後者はそもそもOffice固有の対象外範囲がないため）。
         return out_path, FileReport(path=path, category_counts=counts, notes=notes)
 
     def mask_folder(self, root: Path, out_dir: Path | None = None,

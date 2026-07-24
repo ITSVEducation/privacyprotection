@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +14,19 @@ from .registry import get_handler
 # （常に 0 相当）。本アプリは Windows 専用なのでそれで問題ない。
 _HIDDEN_OR_SYSTEM = stat.FILE_ATTRIBUTE_HIDDEN | stat.FILE_ATTRIBUTE_SYSTEM
 _REPARSE_POINT = stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+# services/pipeline.py の mask_file() が付与する連番付きサフィックス
+# （"_masked" または "_masked(N)"）。ここ(handlers層)で定義し、
+# services/pipeline.py 側がこれをimportして使う（services→handlersという
+# 既存の依存方向を保ったまま、両者が同じ「自アプリ出力の見分け方」を共有
+# できるようにするため）。
+MASKED_SUFFIX = "_masked"
+# 語幹の「末尾」からのみサフィックスを取り除く/検出するためのパターン。
+# 単純な "_masked" in stem という部分一致(旧実装)は、語幹の途中に偶然
+# "_masked" を含む名前（本アプリ由来でないファイル、例:
+# "already_masked_by_someone_else.txt"）まで自アプリの出力と誤認して
+# しまう（最終レビュー Finding 8）ため使わない。
+MASKED_STEM_RE = re.compile(r"^(?P<base>.*)" + re.escape(MASKED_SUFFIX) + r"(?:\(\d+\))?$")
 
 
 @dataclass
@@ -55,7 +69,9 @@ def _is_reparse_point(p: Path) -> bool:
 
 def _is_own_output(p: Path) -> bool:
     name = p.name
-    return ("_masked" in p.stem) or name.endswith(".pmap.csv") or name == "_report.txt"
+    # "_masked" の部分一致ではなく、本アプリが実際に付与する末尾サフィックス
+    # （"_masked"/"_masked(N)"）のみに限定して判定する（Finding 8）。
+    return bool(MASKED_STEM_RE.match(p.stem)) or name.endswith(".pmap.csv") or name == "_report.txt"
 
 
 def walk(root: Path) -> WalkResult:
