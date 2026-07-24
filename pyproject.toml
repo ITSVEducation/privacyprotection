@@ -11,6 +11,14 @@ dependencies = [
     # `split_mode: str` type hint. Pin below the break until ginza publishes
     # a fix (ginza itself only declares spacy>=3.4.4,<4.0.0).
     "spacy>=3.4.4,<3.8.0",
+    # spacy 3.7 / thinc 8.2 のホイールは numpy 1.x の ABI でビルドされているが、
+    # thinc は依存メタデータ上 `numpy>=1.19.0`（上限なし）としか宣言していない
+    # ため、リゾルバ（uv 等）は numpy 2.x を入れてしまう。その状態で spacy を
+    # import すると thinc の C 拡張が
+    # `ValueError: numpy.dtype size changed, may indicate binary incompatibility`
+    # で落ち、NER 検出（＝クリップボード／ファイルのマスク全般）が動かなくなる。
+    # 実測で判明した制約なので、numpy 2.x を明示的に締め出す。
+    "numpy<2",
     "click>=8.1",
     "openpyxl>=3.1",
     "python-docx>=1.1",
