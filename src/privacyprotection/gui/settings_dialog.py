@@ -6,15 +6,19 @@
 日本語ラベルの固定語彙という素のデータであり、検出器やマスカーの組み立て
 （GUI層で禁止されている業務ロジックの再実装）ではない。検出器の組み立ては
 これまで通り `services/pipeline.py` の `Pipeline.from_config()` に閉じている。
+
+画面構成（2026-07-27）: 「検出カテゴリ」と「カスタム辞書」の2タブ。以前は
+1画面へ縦積みしていたため辞書の表が狭く、そもそも辞書を編集できることに
+気づきにくかった。辞書タブでは行の削除と重複語句の検知も行う。
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QGroupBox,
-    QHBoxLayout, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem,
-    QVBoxLayout,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
+    QFileDialog, QHBoxLayout, QHeaderView, QLabel, QMessageBox, QPushButton,
+    QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ..config import AppConfig, export_dictionary_csv, import_dictionary_csv
@@ -37,6 +41,11 @@ _TOGGLE_CATEGORIES = ["PERSON", "ORG", "LOC", "PHONE", "EMAIL",
 # core/models.py へ一本化）であり、ここで新たに導入したものではない。
 _CATEGORY_LABEL_CHOICES = sorted(LABEL_TO_CATEGORY)
 
+_DICT_HELP = (
+    "ここに登録した語句は、上の「検出カテゴリ」のON/OFFに関わらず必ずマスク"
+    "されます。文中に現れれば常に一致します（長い語句が優先）。"
+)
+
 
 class SettingsDialog(QDialog):
     """設定画面。OKで渡された `config`（`AppConfig`）を直接更新する。
@@ -46,26 +55,49 @@ class SettingsDialog(QDialog):
     def __init__(self, config: AppConfig, parent=None):
         super().__init__(parent)
         self.setWindowTitle("設定")
-        self.resize(560, 560)
+        self.resize(620, 560)
         self._config = config
-        layout = QVBoxLayout(self)
 
-        # 検出カテゴリ ON/OFF
-        cat_box = QGroupBox("検出カテゴリ")
-        cat_layout = QVBoxLayout(cat_box)
+        layout = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._build_category_tab(config), "検出カテゴリ")
+        self.tabs.addTab(self._build_dictionary_tab(config), "カスタム辞書")
+        layout.addWidget(self.tabs, stretch=1)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    # --- タブ構築 --------------------------------------------------------
+    def _build_category_tab(self, config: AppConfig) -> QWidget:
+        tab = QWidget()
+        tab_layout = QVBoxLayout(tab)
         self._cat_checks: dict[str, QCheckBox] = {}
         for cat in _TOGGLE_CATEGORIES:
             cb = QCheckBox(f"{CATEGORY_LABELS[cat]}（{cat}）")
             cb.setChecked(cat in config.enabled_categories)
             self._cat_checks[cat] = cb
-            cat_layout.addWidget(cb)
-        layout.addWidget(cat_box)
+            tab_layout.addWidget(cb)
+        tab_layout.addStretch()
+        return tab
 
-        # カスタム辞書
-        dict_box = QGroupBox("カスタム辞書（語句・種別）")
-        dict_layout = QVBoxLayout(dict_box)
+    def _build_dictionary_tab(self, config: AppConfig) -> QWidget:
+        tab = QWidget()
+        tab_layout = QVBoxLayout(tab)
+
+        help_label = QLabel(_DICT_HELP)
+        help_label.setWordWrap(True)
+        help_label.setStyleSheet("color: #555;")
+        tab_layout.addWidget(help_label)
+
         self.table = QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(["語句", "種別"])
+        # 語句列を伸ばして表を全面に使う（従来は狭くて読みづらかった）。
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        # 行削除を選択操作で行うため、行単位・複数選択にする。
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         for word, dict_cat in config.custom_dictionary.items():
             # 手編集のconfig.jsonが固定10種以外のカテゴリを持っていても
             # ここでKeyErrorにせず、コンボボックス側で「カスタム」に
@@ -73,22 +105,20 @@ class SettingsDialog(QDialog):
             # _CATEGORY_LABEL_CHOICES に存在しないため、_append_row内の
             # findText()が-1を返し、既定の「カスタム」選択になる）。
             self._append_row(word, CATEGORY_LABELS.get(dict_cat, dict_cat))
-        dict_layout.addWidget(self.table)
+        tab_layout.addWidget(self.table, stretch=1)
+
         btn_row = QHBoxLayout()
         for label, fn in [("行を追加", self._add_row),
+                          ("選択行を削除", self._delete_rows),
                           ("CSVインポート", self._import_csv),
                           ("CSVエクスポート", self._export_csv)]:
             b = QPushButton(label)
             b.clicked.connect(fn)
             btn_row.addWidget(b)
-        dict_layout.addLayout(btn_row)
-        layout.addWidget(dict_box, stretch=1)
+        tab_layout.addLayout(btn_row)
+        return tab
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
+    # --- 辞書テーブル操作 ------------------------------------------------
     def _append_row(self, word: str = "", label: str = "カスタム") -> None:
         r = self.table.rowCount()
         self.table.insertRow(r)
@@ -109,6 +139,36 @@ class SettingsDialog(QDialog):
 
     def _add_row(self) -> None:
         self._append_row()
+        # 追加した行がすぐ編集できるよう、語句セルへフォーカスを移す。
+        r = self.table.rowCount() - 1
+        self.table.setCurrentCell(r, 0)
+        self.table.editItem(self.table.item(r, 0))
+
+    def _delete_rows(self) -> None:
+        """選択されている行をまとめて削除する。
+
+        従来は追加しかできず、一度登録した語句を画面から消せなかった
+        （config.json を手で編集するしかなかった）。
+        """
+        rows = sorted({idx.row() for idx in self.table.selectedIndexes()},
+                      reverse=True)
+        if not rows:
+            QMessageBox.information(
+                self, "削除する行がありません",
+                "削除したい行を選んでから「選択行を削除」を押してください。")
+            return
+        # 後ろの行から削除する（前から消すと以降の行番号がずれる）。
+        for r in rows:
+            self.table.removeRow(r)
+
+    def _current_words(self) -> list[str]:
+        """表に入力されている語句を行順に返す（空欄は除く）。"""
+        words = []
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, 0)
+            if item and item.text():
+                words.append(item.text())
+        return words
 
     def _import_csv(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "辞書CSV", filter="CSV (*.csv)")
@@ -119,10 +179,25 @@ class SettingsDialog(QDialog):
         except ValueError as exc:
             QMessageBox.warning(self, "インポートエラー", str(exc))
             return
+        # 既存の表と重複する語句は追加しない。追加してしまうと表に同じ語句が
+        # 二重に並び、保存時にどちらか一方が黙って捨てられることになる。
+        existing = set(self._current_words())
+        added, skipped = 0, []
         for word, cat in d.items():
-            self._append_row(word, CATEGORY_LABELS[cat])
-        if warnings:
-            QMessageBox.information(self, "警告", "\n".join(warnings))
+            if word in existing:
+                skipped.append(word)
+                continue
+            self._append_row(word, CATEGORY_LABELS.get(cat, cat))
+            existing.add(word)
+            added += 1
+        messages = [f"{added}件を追加しました。"]
+        if skipped:
+            messages.append(
+                f"既に登録済みのため{len(skipped)}件をスキップしました:\n"
+                + "、".join(skipped[:10])
+                + ("…" if len(skipped) > 10 else ""))
+        messages.extend(warnings)
+        QMessageBox.information(self, "インポート結果", "\n\n".join(messages))
 
     def _export_csv(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "辞書CSV", filter="CSV (*.csv)")
@@ -139,7 +214,38 @@ class SettingsDialog(QDialog):
                 result[word_item.text()] = LABEL_TO_CATEGORY.get(label, "CUSTOM")
         return result
 
+    def _duplicate_words(self) -> list[str]:
+        """表内で2回以上出現する語句を返す（出現順、重複排除済み）。"""
+        seen: set[str] = set()
+        dups: list[str] = []
+        for word in self._current_words():
+            if word in seen and word not in dups:
+                dups.append(word)
+            seen.add(word)
+        return dups
+
+    def _select_rows_with(self, words: set[str]) -> None:
+        self.table.clearSelection()
+        for r in range(self.table.rowCount()):
+            item = self.table.item(r, 0)
+            if item and item.text() in words:
+                self.table.selectRow(r)
+
     def _on_accept(self) -> None:
+        # 同じ語句が複数行にあると、辞書は dict なので後の行が前の行を黙って
+        # 上書きする＝登録したはずの種別が消える。保存を止めてユーザーに知らせ、
+        # 該当行を選択表示して直せるようにする。
+        dups = self._duplicate_words()
+        if dups:
+            self.tabs.setCurrentIndex(self.tabs.count() - 1)  # 辞書タブを表示
+            self._select_rows_with(set(dups))
+            QMessageBox.warning(
+                self, "語句が重複しています",
+                "同じ語句が複数の行に登録されています（該当行を選択しました）。\n"
+                "重複を削除してから保存してください:\n"
+                + "、".join(dups[:10]) + ("…" if len(dups) > 10 else ""))
+            return
+
         # Task 19 調査1: enabled_categories のカテゴリON/OFFフィルタは
         # `core/detector.py` の `Detector.detect()` 側で、
         # source=="dictionary"（カスタム辞書由来）の候補を種別に関わらず
