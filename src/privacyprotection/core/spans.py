@@ -43,6 +43,31 @@ def remaining_spans(
     return remaining
 
 
+def find_occurrences(text: str, value: str) -> list[tuple[int, int]]:
+    """`text` 中の `value` の完全一致・非重複な全出現を (start, end) で返す。
+
+    プレビュー画面の「同じ語をまとめて扱う」モードで、ユーザーがドラッグ選択
+    した語を本文全体の同じ語すべてへ広げるために使う（2026-07-27 設計）。
+
+    - `value` が空なら空リスト（空文字列は無限に一致してしまうため）。
+    - 重なり得る自己出現（"aa" を "aaaa" から探す等）は、直前の一致の末尾から
+      次を探すことで非重複に列挙する（"aaaa" なら2件）。重なったまま返すと
+      呼び出し側で重複したマスク範囲になり、置換時の文字位置ずれを招く。
+    - 完全一致のみ。あいまい一致・正規化一致はしない（設計書 §6: 短い語が別語の
+      一部に一致する過剰マスクを避けるため、展開はユーザーが明示的に選んだ語に
+      限定する方針とセットの割り切り）。
+    """
+    if not value:
+        return []
+    spans: list[tuple[int, int]] = []
+    start = text.find(value)
+    while start != -1:
+        end = start + len(value)
+        spans.append((start, end))
+        start = text.find(value, end)
+    return spans
+
+
 def resolve_overlaps(
     candidates: list[Detection], text: str, priority: dict[str, int],
 ) -> list[Detection]:

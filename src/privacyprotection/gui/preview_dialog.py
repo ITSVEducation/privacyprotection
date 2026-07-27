@@ -18,11 +18,12 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QColor, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QListWidget, QListWidgetItem,
+    QCheckBox, QDialog, QDialogButtonBox, QListWidget, QListWidgetItem,
     QMenu, QMessageBox, QSplitter, QTextEdit, QVBoxLayout,
 )
 
 from ..core.models import CATEGORY_LABELS, LABEL_TO_CATEGORY, Detection
+from ..core.spans import find_occurrences
 
 _CATEGORY_COLORS = {
     "PERSON": "#ffd0d0", "ORG": "#d0e0ff", "LOC": "#d0ffd0",
@@ -79,6 +80,12 @@ class PreviewDialog(QDialog):
         self.fragments = fragments
         self.detections = detections  # list[list[Detection]] を直接編集する
 
+        # 「同じ語をまとめて扱う」モード（既定OFF、2026-07-27 設計）。表示粒度と
+        # 操作粒度を1つのトグルでまとめて切り替える（集約表示なのにクリックは
+        # 1箇所だけ、といった不整合を作らないため）。
+        self.group_same = QCheckBox("同じ語をまとめて扱う（全出現をまとめてマスク）")
+        self.group_same.toggled.connect(self._refresh)
+
         splitter = QSplitter(Qt.Horizontal)
 
         self.text_view = _InteractiveTextView(
@@ -99,6 +106,7 @@ class PreviewDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout(self)
+        layout.addWidget(self.group_same)
         layout.addWidget(splitter, stretch=1)
         layout.addWidget(buttons)
         self._refresh()
@@ -117,15 +125,10 @@ class PreviewDialog(QDialog):
             offset += len(frag.text) + 1  # 区切りの改行分
         self.text_view.setPlainText("\n".join(full))
 
+        # ハイライトはモードに関わらず、有効な検出のスパンすべてに色を付ける。
         cursor = self.text_view.textCursor()
         for fi, dets in enumerate(self.detections):
             for d in dets:
-                item = QListWidgetItem(
-                    f"[{CATEGORY_LABELS.get(d.category, d.category)}] {d.text}")
-                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                item.setCheckState(Qt.Checked if d.enabled else Qt.Unchecked)
-                item.setData(Qt.UserRole, (fi, d))
-                self.list_view.addItem(item)
                 if d.enabled:
                     fmt = QTextCharFormat()
                     # 手編集のconfig.jsonに由来する固定10種以外のカテゴリでも
@@ -137,54 +140,121 @@ class PreviewDialog(QDialog):
                     cursor.setPosition(self._offsets[fi] + d.end,
                                        QTextCursor.KeepAnchor)
                     cursor.setCharFormat(fmt)
+
+        if self.group_same.isChecked():
+            self._populate_list_grouped()
+        else:
+            self._populate_list_individual()
         self.list_view.blockSignals(False)
 
+    def _populate_list_individual(self):
+        """検出スパン1件につき1行（既定）。"""
+        for fi, dets in enumerate(self.detections):
+            for d in dets:
+                item = QListWidgetItem(
+                    f"[{CATEGORY_LABELS.get(d.category, d.category)}] {d.text}")
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked if d.enabled else Qt.Unchecked)
+                item.setData(Qt.UserRole, [d])
+                self.list_view.addItem(item)
+
+    def _populate_list_grouped(self):
+        """同じ (値, カテゴリ) を1行に集約し、件数を ×N で示す。
+
+        チェック状態はグループ内に有効な検出が1つでもあれば Checked とする
+        （このモードではチェック操作もグループ全体に及ぶため、混在状態は
+        操作直後には生じない。OFFで一部だけ無効化してからONへ切り替えた
+        場合にのみ混在があり得るが、その場合も「1つでも有効なら
+        Checked」で表示し、チェックを外せばグループ全体が無効になる）。
+        """
+        groups: dict[tuple[str, str], list[Detection]] = {}
+        for dets in self.detections:
+            for d in dets:
+                groups.setdefault((d.text, d.category), []).append(d)
+        for (text, category), members in groups.items():
+            label = CATEGORY_LABELS.get(category, category)
+            suffix = f"  ×{len(members)}" if len(members) > 1 else ""
+            item = QListWidgetItem(f"[{label}] {text}{suffix}")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.Checked if any(m.enabled for m in members) else Qt.Unchecked)
+            item.setData(Qt.UserRole, members)
+            self.list_view.addItem(item)
+
     def _on_item_toggled(self, item):
-        fi, d = item.data(Qt.UserRole)
-        d.enabled = item.checkState() == Qt.Checked
+        # UserRole には対象の Detection 群が入っている（個別モードなら1件、
+        # まとめモードならその値の全出現）。どちらも同じ扱いで済む。
+        enabled = item.checkState() == Qt.Checked
+        for d in item.data(Qt.UserRole):
+            d.enabled = enabled
         self._refresh()
 
     # --- 左ペインの直接操作 --------------------------------------------
     def _on_drag_select(self, sel_start: int, sel_end: int):
-        """ドラッグ選択された範囲を「カスタム」の手動検出として追加する。"""
+        """ドラッグ選択された範囲を「カスタム」の手動検出として追加する。
+
+        「同じ語をまとめて扱う」ONのときは、選択した語と同じ語を全断片から
+        探して全出現ぶん追加する（設計書 §6: 全出現展開はユーザーが明示的に
+        選んだ語に限定する）。
+        """
         self._add_manual(sel_start, sel_end, _DRAG_ADD_CATEGORY)
 
     def _on_click_disable(self, pos: int):
-        """連結テキスト上の位置 `pos` を含む有効な検出を1件無効化する。
+        """連結テキスト上の位置 `pos` の検出を無効化する。
+
+        個別モード（既定）ではクリックした1箇所だけ。「同じ語をまとめて扱う」
+        ONのときは、その位置の検出と同じ値を持つ有効な検出を全断片からまとめて
+        無効化する（一覧の集約行と粒度を一致させる）。
 
         複数の有効な検出が重なる位置では、最後に追加された（＝最前面に
-        見えている）ものを無効化する。段階的にクリックすれば奥のものも
-        消せるため実害はない。無効化するとハイライトが消え、右リストの
+        見えている）ものを対象にする。無効化するとハイライトが消え、右リストの
         チェックも自動的に外れる（_refresh がチェック状態を d.enabled から
         再構築するため）。再有効化は右リストのチェックで行う。
         """
+        target = self._detection_at(pos)
+        if target is None:
+            return
+        if self.group_same.isChecked():
+            for dets in self.detections:
+                for d in dets:
+                    if d.enabled and d.text == target.text:
+                        d.enabled = False
+        else:
+            target.enabled = False
+        self._refresh()
+
+    def _detection_at(self, pos: int) -> Detection | None:
+        """連結テキスト上の位置 `pos` にある有効な検出を1件返す（無ければ None）。"""
         for fi in reversed(range(len(self._offsets))):
             if pos >= self._offsets[fi]:
                 frag_pos = pos - self._offsets[fi]
                 for d in reversed(self.detections[fi]):
                     if d.enabled and d.start <= frag_pos < d.end:
-                        d.enabled = False
-                        self._refresh()
-                        return
-                return
+                        return d
+                return None
+        return None
 
     def _list_context_menu(self, pos):
         item = self.list_view.itemAt(pos)
         if item is None:
             return
-        _, d = item.data(Qt.UserRole)
+        targets = item.data(Qt.UserRole)
         menu = QMenu(self)
         # ラベル単位で重複排除した代表カテゴリ1つにつき1項目を出す
         # （POSTAL/MYNUMBER/CREDITCARD が同じ「番号」で3つ並ぶのを防ぐ）。
         for label, category in sorted(LABEL_TO_CATEGORY.items()):
             action = QAction(f"「{label}」に変更", menu)
             action.triggered.connect(
-                lambda _=False, det=d, c=category: self._change_category(det, c))
+                lambda _=False, dets=targets, c=category:
+                    self._change_category(dets, c))
             menu.addAction(action)
         menu.exec(self.list_view.mapToGlobal(pos))
 
-    def _change_category(self, detection: Detection, category: str):
-        detection.category = category
+    def _change_category(self, detections: list[Detection], category: str):
+        # 個別モードなら1件、まとめモードならその値の全出現に適用される
+        # （UserRole に入っている対象がモードごとに異なるだけ）。
+        for d in detections:
+            d.category = category
         self._refresh()
 
     def _add_manual(self, sel_start: int, sel_end: int, category: str):
@@ -214,8 +284,29 @@ class PreviewDialog(QDialog):
                     # （優先順位: 手動 > 辞書 > パターン > NER、同順位なら範囲が
                     # 長い方）。重なりの結果はハイライトに反映されて見えるため、
                     # ドラッグごとに情報ダイアログは出さない（軽快さを優先）。
-                    self.detections[fi].append(Detection(
-                        text=text, category=category,
-                        start=frag_start, end=frag_end, source="manual"))
+                    if self.group_same.isChecked():
+                        self._add_all_occurrences(text, category)
+                    else:
+                        self._add_one(fi, text, frag_start, frag_end, category)
                 break
         self._refresh()
+
+    def _add_one(self, fi: int, text: str, start: int, end: int, category: str):
+        """1箇所ぶんの手動検出を追加する（同じスパンが既にあれば追加しない）。"""
+        for existing in self.detections[fi]:
+            if existing.start == start and existing.end == end:
+                # 同じ範囲を二重に持つと、解決後も一覧に同じ行が並ぶだけで
+                # 意味がない（重なり自体は resolve_overlaps が解決する）。
+                # 既存が無効化されていた場合はここで復活させる。
+                existing.enabled = True
+                return
+        self.detections[fi].append(Detection(
+            text=text, category=category,
+            start=start, end=end, source="manual"))
+
+    def _add_all_occurrences(self, value: str, category: str):
+        """全断片から `value` の完全一致・全出現を探して手動検出を追加する
+        （「同じ語をまとめて扱う」ONのときのドラッグ追加）。"""
+        for fi, frag in enumerate(self.fragments):
+            for start, end in find_occurrences(frag.text, value):
+                self._add_one(fi, value, start, end, category)

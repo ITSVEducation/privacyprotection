@@ -9,7 +9,9 @@ test_patterns.py / test_detector.py 側の既存テスト（detect() 経由の�
 はそのまま残す。こちらは共有プリミティブ自体への直接的なユニットテスト。
 """
 from privacyprotection.core.models import Detection
-from privacyprotection.core.spans import remaining_spans, resolve_overlaps
+from privacyprotection.core.spans import (
+    find_occurrences, remaining_spans, resolve_overlaps,
+)
 
 
 def test_no_overlap_returns_span_unchanged():
@@ -138,3 +140,36 @@ def test_resolve_overlaps_unknown_source_treated_as_lowest_priority():
     unknown = _d("de", "B", 3, "some_future_source")
     r = resolve_overlaps([known, unknown], text, {"manual": 0})
     assert [(x.category, x.source) for x in r] == [("A", "manual")]
+
+
+# --- find_occurrences: 「同じ語をまとめて扱う」モードの全出現展開用 ---
+
+def test_find_occurrences_returns_all_matches():
+    text = "谷　直明さんと谷　直明さんが来た"
+    spans = find_occurrences(text, "谷　直明")
+    assert len(spans) == 2
+    for s, e in spans:
+        assert text[s:e] == "谷　直明"
+
+
+def test_find_occurrences_no_match_returns_empty():
+    assert find_occurrences("山田太郎", "佐藤花子") == []
+
+
+def test_find_occurrences_empty_value_returns_empty():
+    # 空文字列は無限に一致してしまうため、明示的に空を返す。
+    assert find_occurrences("何らかの本文", "") == []
+
+
+def test_find_occurrences_self_overlapping_value_is_non_overlapping():
+    # "aa" は "aaaa" の位置0,1,2 に一致しうるが、重なったまま返すと呼び出し側で
+    # マスク範囲が重複し置換時の文字位置ずれを招く。非重複に2件だけ返す。
+    assert find_occurrences("aaaa", "aa") == [(0, 2), (2, 4)]
+
+
+def test_find_occurrences_substring_of_longer_word_also_matches():
+    # 完全一致の部分文字列検索なので、短い語は別語の一部にも一致する
+    # （設計書 §6 の過剰マスクリスク。だからこそ全出現展開はユーザーが
+    # 明示的にドラッグ選択した語に限定する）。この挙動を明示的に固定する。
+    text = "谷さんと谷川さん"
+    assert find_occurrences(text, "谷") == [(0, 1), (4, 5)]
