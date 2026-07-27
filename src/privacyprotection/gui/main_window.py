@@ -94,6 +94,20 @@ class MainWindow(QMainWindow):
         self.clipboard_btn.clicked.connect(self._clipboard_action)
         layout.addWidget(self.clipboard_btn)
 
+        # 設定・辞書への導線。従来は「ツール」メニューからしか辿れず、
+        # カスタム辞書を編集できること自体が見つけにくかったため、メイン画面へ
+        # 直接ボタンを置く（メニュー側も従来どおり残す）。
+        settings_row = QHBoxLayout()
+        self.settings_btn = QPushButton("設定")
+        self.settings_btn.clicked.connect(self._open_settings)
+        self.dictionary_btn = QPushButton("辞書を編集")
+        self.dictionary_btn.setToolTip(
+            "必ずマスクしたい社名・製品名・氏名などを登録します")
+        self.dictionary_btn.clicked.connect(self._open_dictionary)
+        settings_row.addWidget(self.settings_btn)
+        settings_row.addWidget(self.dictionary_btn)
+        layout.addLayout(settings_row)
+
         # モード（マスク/復元）に応じてクリップボードボタンのラベルと挙動を
         # 切り替える（Finding 3）。ラジオボタンはどちらか一方のtoggled(True)
         # だけを見れば十分（QButtonGroupで排他制御されているため）。
@@ -119,9 +133,21 @@ class MainWindow(QMainWindow):
         self._settings_action.triggered.connect(self._open_settings)
 
     # --- 設定画面 --------------------------------------------------------
-    def _open_settings(self):
+    # `clicked`/`triggered` シグナルは bool(checked) を渡してくるため、スロット
+    # 側では受け流す（この bool をタブ番号として受け取ってしまわないよう、
+    # タブ指定は _show_settings 側の引数に分けている）。
+    def _open_settings(self, *_args):
         from .settings_dialog import SettingsDialog
-        dlg = SettingsDialog(self._config, parent=self)
+        self._show_settings(SettingsDialog.TAB_CATEGORIES)
+
+    def _open_dictionary(self, *_args):
+        """設定画面を「カスタム辞書」タブを開いた状態で表示する。"""
+        from .settings_dialog import SettingsDialog
+        self._show_settings(SettingsDialog.TAB_DICTIONARY)
+
+    def _show_settings(self, initial_tab: int):
+        from .settings_dialog import SettingsDialog
+        dlg = SettingsDialog(self._config, parent=self, initial_tab=initial_tab)
         if dlg.exec() == SettingsDialog.Accepted:
             save_config(self._config)
 

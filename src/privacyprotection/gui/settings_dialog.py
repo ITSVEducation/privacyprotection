@@ -52,7 +52,13 @@ class SettingsDialog(QDialog):
     呼び出し元（`MainWindow._open_settings`）が `save_config` で永続化する。
     """
 
-    def __init__(self, config: AppConfig, parent=None):
+    # タブの並び順。呼び出し元が「辞書を開く」導線から
+    # `SettingsDialog(cfg, initial_tab=SettingsDialog.TAB_DICTIONARY)` と
+    # 指定できるよう定数にしておく（インデックス直書きを散らさない）。
+    TAB_CATEGORIES = 0
+    TAB_DICTIONARY = 1
+
+    def __init__(self, config: AppConfig, parent=None, initial_tab: int = 0):
         super().__init__(parent)
         self.setWindowTitle("設定")
         self.resize(620, 560)
@@ -62,6 +68,7 @@ class SettingsDialog(QDialog):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_category_tab(config), "検出カテゴリ")
         self.tabs.addTab(self._build_dictionary_tab(config), "カスタム辞書")
+        self.tabs.setCurrentIndex(initial_tab)
         layout.addWidget(self.tabs, stretch=1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -237,7 +244,7 @@ class SettingsDialog(QDialog):
         # 該当行を選択表示して直せるようにする。
         dups = self._duplicate_words()
         if dups:
-            self.tabs.setCurrentIndex(self.tabs.count() - 1)  # 辞書タブを表示
+            self.tabs.setCurrentIndex(self.TAB_DICTIONARY)  # 辞書タブを表示
             self._select_rows_with(set(dups))
             QMessageBox.warning(
                 self, "語句が重複しています",
