@@ -46,6 +46,50 @@ _DRAG_ADD_CATEGORY = "CUSTOM"
 # 規則に揃える（どれを選んでも復元時の代表カテゴリと一致する一貫性が保てる）。
 
 
+def build_display_map(text: str) -> tuple[str, list[int], list[int]]:
+    """断片テキストを QTextEdit 表示用に正規化し、位置の相互変換表を返す。
+
+    戻り値は (表示テキスト, py2disp, disp2py)。
+    - `py2disp[i]`  … Python文字列オフセット i に対応する表示位置
+    - `disp2py[j]`  … 表示位置 j に対応する Python文字列オフセット
+    いずれも終端（len）を含むため長さは元＋1／表示長＋1。
+
+    **なぜ必要か**: `QTextDocument.setPlainText()` は "\\r\\n" と単独 "\\r" を
+    それぞれ1つの段落区切り（＝1文字ぶんの位置）に畳む。一方 Python の
+    `Detection.start/end` は元テキストのオフセットなので、"\\r\\n" を含む
+    テキスト（Windowsのクリップボードでは一般的）では改行の数だけ両者の位置が
+    ずれていく。この変換を挟まずに `cursor.setPosition(d.start)` すると、
+    ハイライトが本来と無関係な箇所に付き（改行が増えるほど広範囲にずれる）、
+    さらにドラッグ選択で得た表示位置をそのまま Python オフセットとして
+    扱うと、ユーザーが選んだ語とは別の範囲が手動検出として登録されてしまう
+    ＝マスク漏れになる。表示と検出位置の対応を常にこの表経由にする。
+    """
+    out: list[str] = []
+    py2disp = [0] * (len(text) + 1)
+    disp2py: list[int] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "\r":
+            py2disp[i] = len(out)
+            if i + 1 < len(text) and text[i + 1] == "\n":
+                # CRLF: 2文字が表示上1文字（段落区切り）に畳まれる
+                py2disp[i + 1] = len(out)
+                consumed = 2
+            else:
+                consumed = 1
+            disp2py.append(i)
+            out.append("\n")
+            i += consumed
+        else:
+            py2disp[i] = len(out)
+            disp2py.append(i)
+            out.append(text[i])
+            i += 1
+    py2disp[len(text)] = len(out)
+    disp2py.append(len(text))
+    return "".join(out), py2disp, disp2py
+
+
 class _InteractiveTextView(QTextEdit):
     """読み取り専用のまま、左ボタンを離した時の操作を親へ通知するビュー。
 
@@ -113,21 +157,35 @@ class PreviewDialog(QDialog):
 
     # フラグメント境界をまたがない前提で、全断片を連結表示する
     def _refresh(self):
+        # 再描画のたびに先頭へ戻ると「どこを編集していたか」を見失うため、
+        # スクロール位置を保存して復元する（ドラッグ追加・クリック無効化は
+        # いずれもこの再描画を伴うため、保存しないと毎回先頭へ飛ぶ）。
+        vbar = self.text_view.verticalScrollBar()
+        hbar = self.text_view.horizontalScrollBar()
+        saved_v, saved_h = vbar.value(), hbar.value()
+
         self.text_view.clear()
         self.list_view.blockSignals(True)
         self.list_view.clear()
+
+        # 表示テキストと位置変換表を断片ごとに用意する。self._offsets は
+        # 「表示位置」空間での各断片の開始位置（Pythonオフセットではない）。
         offset = 0
         self._offsets = []
+        self._maps = []
         full = []
         for frag in self.fragments:
+            disp, py2disp, disp2py = build_display_map(frag.text)
             self._offsets.append(offset)
-            full.append(frag.text)
-            offset += len(frag.text) + 1  # 区切りの改行分
+            self._maps.append((py2disp, disp2py))
+            full.append(disp)
+            offset += len(disp) + 1  # 区切りの改行分
         self.text_view.setPlainText("\n".join(full))
 
         # ハイライトはモードに関わらず、有効な検出のスパンすべてに色を付ける。
         cursor = self.text_view.textCursor()
         for fi, dets in enumerate(self.detections):
+            py2disp, _ = self._maps[fi]
             for d in dets:
                 if d.enabled:
                     fmt = QTextCharFormat()
@@ -136,10 +194,19 @@ class PreviewDialog(QDialog):
                     # 同じ色にフォールバックする。
                     fmt.setBackground(QColor(
                         _CATEGORY_COLORS.get(d.category, _DEFAULT_CATEGORY_COLOR)))
-                    cursor.setPosition(self._offsets[fi] + d.start)
-                    cursor.setPosition(self._offsets[fi] + d.end,
+                    # Pythonオフセット→表示位置へ変換してから着色する
+                    # （変換しないとCRLFを含むテキストで着色位置がずれる）。
+                    base = self._offsets[fi]
+                    cursor.setPosition(base + py2disp[d.start])
+                    cursor.setPosition(base + py2disp[d.end],
                                        QTextCursor.KeepAnchor)
                     cursor.setCharFormat(fmt)
+
+        # 着色でカーソルに残った文字書式が、この後の操作へ持ち越されないよう
+        # 明示的にリセットしておく。
+        self.text_view.setCurrentCharFormat(QTextCharFormat())
+        vbar.setValue(saved_v)
+        hbar.setValue(saved_h)
 
         if self.group_same.isChecked():
             self._populate_list_grouped()
@@ -200,39 +267,66 @@ class PreviewDialog(QDialog):
         self._add_manual(sel_start, sel_end, _DRAG_ADD_CATEGORY)
 
     def _on_click_disable(self, pos: int):
-        """連結テキスト上の位置 `pos` の検出を無効化する。
+        """クリック位置の検出のマスクON/OFFを切り替える（トグル）。
+
+        有効な検出の上をクリックすれば無効化し、無効化済みの検出の上を
+        もう一度クリックすれば再び有効化する。無効化した箇所はハイライトが
+        消えるが範囲自体は保持しているため、同じ場所をクリックすれば戻せる
+        （右リストのチェックを付け外すのと同じ結果になる）。
 
         個別モード（既定）ではクリックした1箇所だけ。「同じ語をまとめて扱う」
-        ONのときは、その位置の検出と同じ値を持つ有効な検出を全断片からまとめて
-        無効化する（一覧の集約行と粒度を一致させる）。
+        ONのときは、同じ値を持つ検出を全断片からまとめて切り替える
+        （一覧の集約行と粒度を一致させる）。
 
-        複数の有効な検出が重なる位置では、最後に追加された（＝最前面に
-        見えている）ものを対象にする。無効化するとハイライトが消え、右リストの
-        チェックも自動的に外れる（_refresh がチェック状態を d.enabled から
-        再構築するため）。再有効化は右リストのチェックで行う。
+        複数の検出が重なる位置では、有効なものを優先し、なければ無効化済みの
+        ものを対象にする（同順ならいずれも最後に追加されたもの＝最前面）。
         """
         target = self._detection_at(pos)
         if target is None:
             return
+        new_state = not target.enabled
         if self.group_same.isChecked():
             for dets in self.detections:
                 for d in dets:
-                    if d.enabled and d.text == target.text:
-                        d.enabled = False
+                    if d.text == target.text:
+                        d.enabled = new_state
         else:
-            target.enabled = False
+            target.enabled = new_state
         self._refresh()
 
     def _detection_at(self, pos: int) -> Detection | None:
-        """連結テキスト上の位置 `pos` にある有効な検出を1件返す（無ければ None）。"""
+        """表示位置 `pos` にある検出を1件返す（無ければ None）。
+
+        有効な検出を優先して返し、無ければ無効化済みの検出を返す（クリックでの
+        再有効化を可能にするため）。いずれも同じ位置に複数あれば最後に追加
+        されたものを選ぶ。
+        """
+        fi, frag_pos = self._locate(pos)
+        if fi is None:
+            return None
+        fallback: Detection | None = None
+        for d in reversed(self.detections[fi]):
+            if d.start <= frag_pos < d.end:
+                if d.enabled:
+                    return d
+                if fallback is None:
+                    fallback = d
+        return fallback
+
+    def _locate(self, pos: int) -> tuple[int | None, int]:
+        """表示位置 `pos` を (断片index, その断片内のPythonオフセット) に変換する。
+
+        断片が見つからない、または断片の区切り（連結時に挿入した改行）上を
+        指している場合は (None, 0) を返す。
+        """
         for fi in reversed(range(len(self._offsets))):
             if pos >= self._offsets[fi]:
-                frag_pos = pos - self._offsets[fi]
-                for d in reversed(self.detections[fi]):
-                    if d.enabled and d.start <= frag_pos < d.end:
-                        return d
-                return None
-        return None
+                disp_pos = pos - self._offsets[fi]
+                _, disp2py = self._maps[fi]
+                if disp_pos >= len(disp2py):
+                    return None, 0  # 断片間の区切り改行
+                return fi, disp2py[disp_pos]
+        return None, 0
 
     def _list_context_menu(self, pos):
         item = self.list_view.itemAt(pos)
@@ -258,37 +352,48 @@ class PreviewDialog(QDialog):
         self._refresh()
 
     def _add_manual(self, sel_start: int, sel_end: int, category: str):
-        # どの断片か特定（offsetsは各断片の開始位置＝直前までの断片＋区切り
-        # 改行の累計なので、sel_start以下で最大のoffsetを持つ断片を選ぶ）。
-        for fi in reversed(range(len(self._offsets))):
-            if sel_start >= self._offsets[fi]:
-                frag_start = sel_start - self._offsets[fi]
-                frag_end = sel_end - self._offsets[fi]
-                frag_len = len(self.fragments[fi].text)
-                # 選択範囲が断片境界（連結時に挿入した改行、または次の断片）を
-                # またいでいないかを確認する。またいでいる場合、黙って frag_end を
-                # 断片長でクリップすると、ユーザーの選択範囲の一部が記録されない
-                # まま Detection.text が短く確定してしまい、気づかれないまま
-                # マスク漏れにつながる。ここでは黙って切り詰めず、操作を中止して
-                # ユーザーに伝える（マスク漏れに直結するため警告は残す）。
-                if frag_start >= frag_len or frag_end > frag_len:
-                    QMessageBox.warning(
-                        self, "追加できません",
-                        "選択範囲が段落／セルなどの区切りをまたいでいます。"
-                        "1つの区切り内に収まるよう選び直してください。")
-                    return
-                text = self.fragments[fi].text[frag_start:frag_end]
-                if text:
-                    # この時点で既存の有効な検出と重なっていても、データ破壊は
-                    # core/masker.py 側の resolve_overlaps によって防がれる
-                    # （優先順位: 手動 > 辞書 > パターン > NER、同順位なら範囲が
-                    # 長い方）。重なりの結果はハイライトに反映されて見えるため、
-                    # ドラッグごとに情報ダイアログは出さない（軽快さを優先）。
-                    if self.group_same.isChecked():
-                        self._add_all_occurrences(text, category)
-                    else:
-                        self._add_one(fi, text, frag_start, frag_end, category)
-                break
+        """表示位置で指定された選択範囲を手動検出として追加する。
+
+        `sel_start`/`sel_end` は QTextEdit 上の表示位置なので、必ず
+        `build_display_map` の変換表を通して Python オフセットへ直してから
+        `Detection` にする（直接使うと CRLF を含むテキストで、ユーザーが
+        選んだ語とは別の範囲が登録されてしまう）。
+        """
+        fi, frag_start = self._locate(sel_start)
+        # 終端は「その位置の直前まで」を意味するため、範囲の最後の文字から
+        # 求める（sel_end 自体は次の文字の位置＝断片外を指すことがある）。
+        end_fi, last_char_start = self._locate(max(sel_end - 1, sel_start))
+        if fi is None:
+            return
+        # 選択範囲が断片境界（連結時に挿入した改行、または次の断片）を
+        # またいでいないかを確認する。またいでいる場合、黙って範囲を断片長で
+        # クリップすると、ユーザーの選択範囲の一部が記録されないまま
+        # Detection.text が短く確定してしまい、気づかれないままマスク漏れに
+        # つながる。ここでは黙って切り詰めず、操作を中止してユーザーに伝える。
+        if end_fi != fi:
+            QMessageBox.warning(
+                self, "追加できません",
+                "選択範囲が段落／セルなどの区切りをまたいでいます。"
+                "1つの区切り内に収まるよう選び直してください。")
+            return
+        frag_text = self.fragments[fi].text
+        # last_char_start は範囲内最後の文字の開始オフセット。CRLF のような
+        # 複数文字が表示上1文字に畳まれている場合も含め、その文字の終端まで
+        # を範囲に含める。
+        frag_end = last_char_start + 1
+        if frag_text[last_char_start:last_char_start + 2] == "\r\n":
+            frag_end = last_char_start + 2
+        text = frag_text[frag_start:frag_end]
+        if text:
+            # この時点で既存の有効な検出と重なっていても、データ破壊は
+            # core/masker.py 側の resolve_overlaps によって防がれる
+            # （優先順位: 手動 > 辞書 > パターン > NER、同順位なら範囲が
+            # 長い方）。重なりの結果はハイライトに反映されて見えるため、
+            # ドラッグごとに情報ダイアログは出さない（軽快さを優先）。
+            if self.group_same.isChecked():
+                self._add_all_occurrences(text, category)
+            else:
+                self._add_one(fi, text, frag_start, frag_end, category)
         self._refresh()
 
     def _add_one(self, fi: int, text: str, start: int, end: int, category: str):
