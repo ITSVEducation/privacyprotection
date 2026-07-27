@@ -164,6 +164,12 @@ class PreviewDialog(QDialog):
         hbar = self.text_view.horizontalScrollBar()
         saved_v, saved_h = vbar.value(), hbar.value()
 
+        # 本文を入れ直す前に文字書式をリセットする。ハイライト部分をクリック／
+        # ドラッグすると QTextEdit の currentCharFormat がその位置の書式（＝
+        # カテゴリ色の背景）になり、この後の setPlainText() がその書式のまま
+        # 全文を挿入するため、左ペイン全体が同じ色で塗り潰されてしまう。
+        # setPlainText() の「後」にリセットしても手遅れなので、必ず前に行う。
+        self.text_view.setCurrentCharFormat(QTextCharFormat())
         self.text_view.clear()
         self.list_view.blockSignals(True)
         self.list_view.clear()
@@ -263,7 +269,15 @@ class PreviewDialog(QDialog):
         「同じ語をまとめて扱う」ONのときは、選択した語と同じ語を全断片から
         探して全出現ぶん追加する（設計書 §6: 全出現展開はユーザーが明示的に
         選んだ語に限定する）。
+
+        ただし既存の検出の上での1文字以下の選択は、クリックしようとして数
+        ピクセル動いてしまった操作とみなし、追加ではなくON/OFFの切り替えとして
+        扱う（クリックのつもりが1文字だけの無意味なマスクを増やしてしまうのを
+        防ぐ。そのような包含された検出はどのみち resolve_overlaps で破棄される）。
         """
+        if sel_end - sel_start <= 1 and self._detection_at(sel_start) is not None:
+            self._on_click_disable(sel_start)
+            return
         self._add_manual(sel_start, sel_end, _DRAG_ADD_CATEGORY)
 
     def _on_click_disable(self, pos: int):
