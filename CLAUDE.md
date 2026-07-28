@@ -45,70 +45,47 @@ powershell -ExecutionPolicy Bypass -File scripts/build.ps1
 There is no lint/format tooling configured (no ruff/black/flake8 config exists) — don't invent one
 unprompted.
 
-## Critical environment gotcha: spacy/ginza version pin
+## Critical environment gotcha: dependency pins that must not float
 
-`pyproject.toml` pins `spacy>=3.4.4,<3.8.0`. **Do not remove this pin or let it float to spacy>=3.8** —
-that version breaks `ja_ginza`'s `compound_splitter` pipeline factory (confection's stricter config
-validation rejects the factory's own `default_config={"split_mode": None}` against its `str` type
-hint), and `ja_ginza` has not published a fix. This was diagnosed empirically, not guessed. If you
-ever need to touch NLP dependencies, re-verify `spacy.load("ja_ginza")` actually produces entities
-(`doc.ents`) before assuming it works — a config error at load time is easy to mistake for "not
-installed." Also note: `spacy` imports `click` directly at runtime without declaring it as a
-dependency in some resolutions — it's pinned explicitly in `pyproject.toml` for that reason.
+`pyproject.toml` pins `spacy>=3.4.4,<3.8.0` and `numpy<2`. **Both upper bounds are load-bearing** —
+dropping either kills GiNZA NER, i.e. masking stops detecting anything, and both failure modes read
+as "the model isn't installed" rather than "the pin was wrong." Per-pin rationale is in the
+`pyproject.toml` comments; both were diagnosed empirically, not guessed. A PreToolUse hook
+(`scripts/hooks/guard-dependency-pins.ps1`) blocks edits that remove them. If you do raise one
+deliberately, re-verify that `spacy.load("ja_ginza")` actually produces entities (`doc.ents`) before
+assuming it works. Also note: `spacy` imports `click` at runtime without declaring it as a
+dependency in some resolutions — it's pinned explicitly for that reason.
 
 ## Architecture
 
-Three layers, strictly separated by dependency direction — GUI depends on services, services depend
-on core+handlers, core and handlers never import from each other's siblings except through the
-composition points below. This isolation is deliberate (see `docs/02-architecture.md`): the core
-layer is GUI-free and fully unit-testable; the GUI is a thin wrapper that can't be unit tested the
-same way. `docs/02-architecture.md` is the authoritative, detailed description — this section is the
-index plus the handful of privacy-critical invariants that must never regress.
+Three layers, one-directional dependencies: GUI → services → core + handlers. Core and handlers
+never import each other. `docs/02-architecture.md` is the authoritative description of interfaces,
+data flow, output atomicity, and folder-walk boundary conditions — read it there rather than
+re-deriving from source. This section is the index plus the invariants.
 
-**`core/`** — detection, masking, and restoration, all pure functions/classes over plain strings.
-No file I/O, no GUI, no network. Three independent detectors (`PatternDetector` regex,
-`DictionaryDetector` term list, `NerDetector` lazy-loaded GiNZA NER) each return
-`list[Detection]` and are combined by `Detector`. Invariants that must hold:
-- **Overlap = trim, never discard** (`core/spans.py`'s `remaining_spans()`, used by both
-  `patterns.py` and `detector.py`): when a lower-priority detection partially overlaps a
-  higher-priority one without full containment, it is **trimmed to its non-overlapping remainder,
-  not dropped**. A regression to discard-on-overlap silently drops real PII (e.g. address abutting a
-  phone number) — a reviewer treats it as a privacy bug, not a style nit.
-- **One `Masker` per batch**: reuse a single `Masker` instance across a whole folder so the same
-  real-world value always maps to the same token (`【人名_1】` etc.); see
-  `Masker.scan_existing_tokens()` for collision avoidance with pre-existing token-shaped text.
-- **Mapping CSV is deliberately plain text** (`mapping_io.py`, `.pmap.csv`, UTF-8 BOM) — threat
-  model is "don't let PII reach a cloud AI," not at-rest protection. It rejects duplicate tokens on
-  load; don't relax that check.
-- **`Restorer` uses exact string match only** — never fuzzy-match or auto-correct a garbled token;
-  an altered token is left in place and reported as unknown, not guessed at.
+| Layer | Role |
+|---|---|
+| `gui/` | PySide6. Calls `services/` only — never imports `core/` or `handlers/` |
+| `services/` | Binds handlers + core into whole-file and whole-folder mask/restore; builds the post-run report |
+| `core/` | Detection (`PatternDetector` / `DictionaryDetector` / `NerDetector`, combined by `Detector`), `Masker`, `Restorer`. Pure functions over strings — no file I/O, no GUI, no network |
+| `handlers/` | One `FileHandler` per format. Extracts and writes back only the text fragments worth scanning, leaving formatting/formulas/unrelated cells untouched. `TextHandler` output is byte-identical to the original except for the substituted spans |
 
-**`handlers/`** — one class per file format implementing the `FileHandler` ABC (`read_fragments`,
-`write_fragments`). A `Fragment` is a location-tagged piece of text; handlers extract only the
-fragments worth scanning and write back *only* those, leaving formatting/formulas/unrelated cells
-untouched. `TextHandler` preserves exact byte-level encoding and line endings — a masked plain-text
-file is byte-identical to the original except for the substituted spans.
+### Privacy invariants — never regress these
 
-**`services/`** — orchestrates handlers + core into whole-file and whole-folder mask/restore
-operations, plus the post-processing report shown to the user. The report **never includes an actual
-detected PII value**, only category names and counts — a hard constraint from the design doc.
+Rationale and verification steps live in `.claude/rules/core-invariants.md`, which loads when you
+open `core/` or `services/`. A PostToolUse hook runs the corresponding tests on every edit to those
+directories (`.claude/settings.json`).
 
-**`gui/`** — PySide6. Talks only to `services/`, never imports from `core/` or `handlers/` directly.
+- Overlapping detections are **trimmed to their non-overlapping remainder, never discarded**.
+- `Detection.text` always equals `original_text[detection.start:detection.end]`.
+- **One `Masker` per batch**, so the same real value maps to the same token across a whole folder.
+- `Restorer` matches tokens **exactly** — never fuzzy-match or auto-correct a garbled token.
+- The mapping CSV (`.pmap.csv`) is **deliberately plain text** and rejects duplicate tokens on load.
+- Reports, logs, and error messages carry **categories and counts only, never a detected value**.
 
-## Working conventions established during implementation
+## Working conventions
 
-- Token category labels are a **fixed, closed vocabulary** defined once in `core/models.py`
-  (`CATEGORY_LABELS`) — several distinct detection categories intentionally share one label (e.g.
-  `POSTAL`, `MYNUMBER`, `CREDITCARD` all render as `番号`). Don't add a new label without checking
-  whether an existing one already covers the concept.
-- Every `Detection.text` must equal `original_text[detection.start:detection.end]` exactly — this
-  invariant has caused real bugs (regex `.group()` vs. recomputed slices diverging after a span was
-  trimmed) and is worth an explicit test assertion whenever you touch span arithmetic.
-- Error messages and the eventual user-facing report must never contain an actual detected value —
-  only counts, categories, and file/token names. This has been treated as a hard constraint in every
-  task so far, not something to weigh against convenience.
-- The plan's own reference code for a task is a *starting point*, not gospel — several tasks so far
-  have found and fixed genuine bugs in it (reversed token numbering, an unreachable "undecodable
-  bytes" test case, discard-on-overlap instead of trim). Run the given tests against reference code
-  before trusting it; treat test failures as real, not as something to work around by weakening the
-  test.
+- The implementation plan's own reference code is a *starting point*, not gospel — several tasks
+  found genuine bugs in it (reversed token numbering, an unreachable "undecodable bytes" test case,
+  discard-on-overlap instead of trim). Run the given tests against reference code before trusting
+  it; treat failures as real, not as something to work around by weakening the test.
