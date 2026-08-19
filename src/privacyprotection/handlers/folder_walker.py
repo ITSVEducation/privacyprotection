@@ -74,34 +74,51 @@ def _is_own_output(p: Path) -> bool:
     return bool(MASKED_STEM_RE.match(p.stem)) or name.endswith(".pmap.csv") or name == "_report.txt"
 
 
+def _prune_dirs(dirpath: str, dirnames: list[str]) -> None:
+    """os.walk が次に降りるディレクトリから、辿ってはいけないものを取り除く
+    （in-place。設計書 2.8）。
+
+    隠し/システムディレクトリ、シンボリックリンク・ジャンクションは辿らない
+    （無限ループ防止）。os.walk の followlinks=False 自体はジャンクションを
+    止められないため、dirnames をその場でフィルタして列挙元で止める。
+    """
+    kept = []
+    for d in dirnames:
+        dp = Path(dirpath) / d
+        if d.startswith("."):
+            continue
+        if _is_reparse_point(dp):
+            continue
+        if _is_hidden_or_system(dp):
+            continue
+        kept.append(d)
+    dirnames[:] = kept
+
+
+def _skip_reason(p: Path) -> str | None:
+    """列挙から外すべきファイルならその理由、対象にできるなら None
+    （設計書 2.8 の境界条件）。walk() は理由をレポート用の skipped に
+    載せ、walk_masked() は理由を使わず単に除外する。
+    """
+    if p.is_symlink() or _is_reparse_point(p):
+        return "シンボリックリンク/ジャンクション"
+    if _is_hidden_or_system(p):
+        return "隠し/システムファイル"
+    if p.name.startswith(("~$", ".")):
+        return "一時/隠しファイル"
+    return None
+
+
 def walk(root: Path) -> WalkResult:
     result = WalkResult()
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        # 隠し/システムディレクトリ、シンボリックリンク・ジャンクションは辿らない
-        # （無限ループ防止）。os.walk の followlinks=False 自体はジャンクションを
-        # 止められないため、dirnames をその場でフィルタして列挙元で止める。
-        kept_dirs = []
-        for d in dirnames:
-            dp = Path(dirpath) / d
-            if d.startswith("."):
-                continue
-            if _is_reparse_point(dp):
-                continue
-            if _is_hidden_or_system(dp):
-                continue
-            kept_dirs.append(d)
-        dirnames[:] = kept_dirs
+        _prune_dirs(dirpath, dirnames)
 
         for name in sorted(filenames):
             p = Path(dirpath) / name
-            if p.is_symlink() or _is_reparse_point(p):
-                result.skipped.append((p, "シンボリックリンク/ジャンクション"))
-                continue
-            if _is_hidden_or_system(p):
-                result.skipped.append((p, "隠し/システムファイル"))
-                continue
-            if name.startswith(("~$", ".")):
-                result.skipped.append((p, "一時/隠しファイル"))
+            reason = _skip_reason(p)
+            if reason is not None:
+                result.skipped.append((p, reason))
                 continue
             if _is_own_output(p):
                 continue  # 本アプリの出力物は黙って除外（レポート対象にもしない）
@@ -110,3 +127,29 @@ def walk(root: Path) -> WalkResult:
                 continue
             result.supported.append(p)
     return result
+
+
+def walk_masked(root: Path) -> list[Path]:
+    """本アプリのマスク済み出力（`*_masked` / `*_masked(N)`）だけを再帰列挙する
+    （フォルダ一括復元の対象。設計書 2.8）。
+
+    境界条件は walk() と同じものを共有する（`_prune_dirs` / `_skip_reason`）:
+    シンボリックリンク・NTFS ジャンクションは辿らず、隠し/システムファイルと
+    `~$` で始まる Office ロックファイルはスキップする。walk() が自アプリの
+    出力を除外するのに対し、こちらは逆に自アプリの出力だけを集める — 復元の
+    対象がまさにそれだから。対応表CSV（`*.pmap.csv`）とレポート（`_report.txt`）は
+    マスク済み命名に一致しないため自然に外れる。
+    """
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        _prune_dirs(dirpath, dirnames)
+        for name in sorted(filenames):
+            p = Path(dirpath) / name
+            if _skip_reason(p) is not None:
+                continue
+            if not MASKED_STEM_RE.match(p.stem):
+                continue
+            if get_handler(p) is None:
+                continue
+            found.append(p)
+    return found

@@ -1,7 +1,7 @@
 import ctypes
 import subprocess
 
-from privacyprotection.handlers.folder_walker import walk
+from privacyprotection.handlers.folder_walker import walk, walk_masked
 from privacyprotection.handlers.registry import get_handler
 from privacyprotection.handlers.text_handler import TextHandler
 from privacyprotection.handlers.xlsx_handler import XlsxHandler
@@ -98,3 +98,94 @@ def test_walk_does_not_follow_ntfs_junction(tmp_path):
     assert supported_names == ["inside.txt"]
     (only_hit,) = [p for p in r.supported if p.name == "inside.txt"]
     assert junction not in only_hit.parents
+
+
+# --- walk_masked() のテスト ---
+
+def test_walk_masked_collects_only_masked_files_with_handler(tmp_path):
+    """walk_masked はマスク済み命名（*_masked / *_masked(N)）のファイルだけを
+    集める。サポートされたハンドラがあること、サブディレクトリの再帰も含む。
+    除外されるべきもの: 平文ファイル、未対応拡張子、対応表CSV、レポート、
+    マスク済み命名だがハンドラなしの拡張子。"""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "plain.txt").write_text("x")           # 平文ファイル→除外
+    (tmp_path / "sub" / "report_masked.txt").write_text("x")  # マスク済み→対象
+    (tmp_path / "unknown_masked.pdf").write_text("x")   # マスク済みだが未対応拡張子→除外
+    (tmp_path / "data_masked.xlsx").write_bytes(b"x")   # マスク済み→対象
+    (tmp_path / "data_masked(2).xlsx").write_bytes(b"x")  # マスク済み(連番)→対象
+    (tmp_path / "data_masked.txt.pmap.csv").write_text("x")  # 対応表→除外
+    (tmp_path / "_report.txt").write_text("x")         # レポート→除外
+
+    result = walk_masked(tmp_path)
+    names = sorted(p.name for p in result)
+
+    assert names == ["data_masked(2).xlsx", "data_masked.xlsx", "report_masked.txt"]
+
+
+def test_walk_masked_skips_office_lock_file(tmp_path):
+    """walk_masked は ~$ で始まるマスク済み命名のOfficeロックファイルを
+    スキップする（e.g. ~$doc_masked.docx）。"""
+    (tmp_path / "~$doc_masked.docx").write_bytes(b"x")  # ロックファイル→除外
+    (tmp_path / "normal_masked.docx").write_bytes(b"x")  # 通常ファイル→対象
+
+    result = walk_masked(tmp_path)
+    names = sorted(p.name for p in result)
+
+    assert names == ["normal_masked.docx"]
+
+
+def test_walk_masked_skips_windows_hidden_and_system_file(tmp_path):
+    """walk_masked は Windows 隠し属性・システム属性が設定されたマスク済み
+    ファイルをスキップする。"""
+    target = tmp_path / "secret_masked.txt"
+    target.write_text("x")
+    ok = ctypes.windll.kernel32.SetFileAttributesW(
+        str(target), _FILE_ATTRIBUTE_HIDDEN | _FILE_ATTRIBUTE_SYSTEM
+    )
+    assert ok, "SetFileAttributesW failed"
+
+    (tmp_path / "normal_masked.txt").write_text("x")
+
+    result = walk_masked(tmp_path)
+    names = sorted(p.name for p in result)
+
+    assert names == ["normal_masked.txt"]
+    assert "secret_masked.txt" not in names
+
+
+def test_walk_masked_does_not_follow_ntfs_junction(tmp_path):
+    """walk_masked は NTFS ジャンクションを辿らない。ジャンクション内の
+    ファイルは real_target 経由で見えるべき。"""
+    real_target = tmp_path / "real_target"
+    real_target.mkdir()
+    (real_target / "file_masked.txt").write_text("x")
+
+    junction = tmp_path / "junction_link"
+    proc = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(real_target)],
+        capture_output=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    result = walk_masked(tmp_path)
+
+    # ファイルは real_target 経由で1回だけ見える
+    names = sorted(p.name for p in result)
+    assert names == ["file_masked.txt"]
+    (only_hit,) = result
+    assert junction not in only_hit.parents
+
+
+def test_walk_masked_does_not_collect_masked_substring_not_at_suffix(tmp_path):
+    """walk_masked は "_masked" を末尾サフィックスとしてのみ認識する。
+    語幹の途中に "_masked" を含むだけのファイル
+    （e.g. already_masked_by_someone_else.txt）は集めない。"""
+    (tmp_path / "already_masked_by_someone_else_masked.txt").write_text("x")  # 末尾→対象
+    (tmp_path / "already_masked_by_someone_else.txt").write_text("x")  # 途中→除外
+    (tmp_path / "name_masked_in_middle_file.txt").write_text("x")  # 途中→除外
+
+    result = walk_masked(tmp_path)
+    names = sorted(p.name for p in result)
+
+    # 末尾に "_masked" のあるものだけが集まる
+    assert names == ["already_masked_by_someone_else_masked.txt"]

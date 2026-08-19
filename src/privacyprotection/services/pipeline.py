@@ -15,7 +15,7 @@ from ..core.models import Detection, Fragment, MappingTable, RestoreResult
 from ..core.ner import NerDetector
 from ..core.patterns import PatternDetector
 from ..core.restorer import Restorer
-from ..handlers.folder_walker import MASKED_STEM_RE, MASKED_SUFFIX, walk
+from ..handlers.folder_walker import MASKED_STEM_RE, MASKED_SUFFIX, walk, walk_masked
 from ..handlers.registry import get_handler
 from .intent import FOLDER_MAPPING_NAME
 from .report import BatchReport, FileReport
@@ -323,12 +323,14 @@ class Pipeline:
         なければファイルごとのサイドカー（restore_file の既定探索）に
         委ねる。戻り値の警告リストにはファイル名・件数のみを載せ、
         検出値やトークンの中身は含めない（不変条件）。
+
+        ターゲット列挙は walk_masked() を通し、walk() と同じ境界条件を共有する
+        （設計書 2.8: シンボリックリンク・ジャンクションは辿らず、隠し/システム
+        ファイルと~$で始まるOfficeロックファイルをスキップ）。
         """
         shared = root / FOLDER_MAPPING_NAME
         mapping_path = shared if shared.exists() else None
-        targets = [p for p in sorted(root.rglob("*"))
-                   if p.is_file() and MASKED_STEM_RE.match(p.stem)
-                   and get_handler(p) is not None]
+        targets = walk_masked(root)
         restored = 0
         warnings: list[str] = []
         total = len(targets)
