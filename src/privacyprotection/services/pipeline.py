@@ -161,11 +161,23 @@ class Pipeline:
             _atomic_write(lambda p: write_mapping(table, p), mapping_path)
         return masked_texts[0], table, active_count
 
-    def analyze_file(self, path: Path):
+    def read_fragments(self, path: Path) -> list[Fragment]:
+        """ファイルからテキスト断片を読むだけの公開API（検出はしない）。
+
+        GUI が意図の自動判定（services/intent.py）のために断片テキストを
+        必要とするが、GUI は handlers/ を直接 import できないため、
+        Pipeline の公開APIとして提供する。読んだ断片は analyze_file の
+        `fragments` 引数に渡して再利用できる（二重読み込みの回避）。
+        """
         handler = get_handler(path)
         if handler is None:
             raise ValueError(f"未対応の拡張子です: {path.suffix}")
-        fragments = handler.read_fragments(path)
+        return handler.read_fragments(path)
+
+    def analyze_file(self, path: Path,
+                     fragments: list[Fragment] | None = None):
+        if fragments is None:
+            fragments = self.read_fragments(path)
         detections = [self._detector.detect(f.text) for f in fragments]
         return fragments, detections
 

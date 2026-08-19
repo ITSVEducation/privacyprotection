@@ -591,3 +591,30 @@ def test_mask_restore_roundtrip_pptx(tmp_path):
     restored = {f.location: f.text for f in handler.read_fragments(restored_path)}
     assert restored == original
     assert result.unknown_tokens == []
+
+
+def test_read_fragments_reads_without_detection(tmp_path):
+    src = tmp_path / "memo.txt"
+    src.write_text("山田太郎", encoding="utf-8")
+    pl = make_pipeline()
+    frags = pl.read_fragments(src)
+    assert [f.text for f in frags] == ["山田太郎"]
+
+
+def test_read_fragments_rejects_unsupported_extension(tmp_path):
+    src = tmp_path / "memo.exe"
+    src.write_text("x", encoding="utf-8")
+    pl = make_pipeline()
+    with pytest.raises(ValueError):
+        pl.read_fragments(src)
+
+
+def test_analyze_file_reuses_given_fragments(tmp_path):
+    src = tmp_path / "memo.txt"
+    src.write_text("山田太郎", encoding="utf-8")
+    pl = make_pipeline()
+    frags = pl.read_fragments(src)
+    src.unlink()  # 再読み込みしていればここで失敗する
+    frags2, dets = pl.analyze_file(src, fragments=frags)
+    assert frags2 is frags
+    assert dets[0][0].category == "PERSON"
