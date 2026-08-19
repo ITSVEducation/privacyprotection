@@ -170,6 +170,13 @@ class MainWindow(QMainWindow):
             return
 
         for p in paths:
+            # 未対応拡張子・単一ファイルモードへのフォルダ混在ドロップ・
+            # ハンドラの読み書きエラー・read_mapping の重複トークン検出など、
+            # あらゆる失敗を1ファイルごとに捕え、1件の失敗で残りの処理まで
+            # 巻き込んで落ちないよう、ファイル単位のダイアログに留める。
+            # マスク・復元の両経路がこの単一の except ブロックを共有する
+            # （Finding 4）。mask_folder の per-file except ブロックと同じ
+            # 一般的なメッセージ形式に揃える。
             try:
                 fragments = pipeline.read_fragments(p)
                 intent = decide_file_intent(
