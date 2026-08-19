@@ -58,8 +58,12 @@ class AdvancedPanel(QWidget):
         method_row.addWidget(QLabel("方式:"))
         self._token_radio = QRadioButton("可逆（トークン）")
         self._redact_radio = QRadioButton("不可逆（塗りつぶし）")
-        (self._token_radio if config.mask_mode == "token"
-         else self._redact_radio).setChecked(True)
+        # 不正な mask_mode（config.json の手編集・破損・将来の値）は安全側の
+        # 可逆に落とす。"redact" と明示されたときだけ不可逆を選ぶ — action_mode
+        # を許容値リストで検証して "auto" に落とすのと対称であり、曖昧な設定値
+        # のせいで気づかないまま不可逆マスクになる事故を防ぐ。
+        (self._redact_radio if config.mask_mode == "redact"
+         else self._token_radio).setChecked(True)
         group = QButtonGroup(self)
         group.addButton(self._token_radio)
         group.addButton(self._redact_radio)
