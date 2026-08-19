@@ -29,3 +29,19 @@ def test_dictionary_csv_roundtrip_and_duplicate_warning(tmp_path):
     out = tmp_path / "out.csv"
     export_dictionary_csv(d, out)
     assert out.read_bytes().startswith(b"\xef\xbb\xbf")
+
+def test_new_ui_fields_roundtrip(tmp_path):
+    p = tmp_path / "config.json"
+    cfg = AppConfig(action_mode="restore", advanced_expanded=True)
+    save_config(cfg, p)
+    loaded = load_config(p)
+    assert loaded.action_mode == "restore"
+    assert loaded.advanced_expanded is True
+
+
+def test_new_ui_fields_default_when_missing(tmp_path):
+    p = tmp_path / "config.json"
+    p.write_text('{"mask_mode": "token"}', encoding="utf-8")
+    loaded = load_config(p)
+    assert loaded.action_mode == "auto"
+    assert loaded.advanced_expanded is False

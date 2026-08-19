@@ -24,6 +24,8 @@ class AppConfig:
     output_dir: str | None = None
     skip_preview: bool = False
     mask_mode: str = "token"
+    action_mode: str = "auto"          # "auto" | "mask" | "restore"
+    advanced_expanded: bool = False    # 詳細設定パネルの開閉状態
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -37,6 +39,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         output_dir=data.get("output_dir"),
         skip_preview=bool(data.get("skip_preview", False)),
         mask_mode=data.get("mask_mode", "token"),
+        action_mode=data.get("action_mode", "auto"),
+        advanced_expanded=bool(data.get("advanced_expanded", False)),
     )
 
 
@@ -49,6 +53,8 @@ def save_config(cfg: AppConfig, path: Path | None = None) -> None:
         "output_dir": cfg.output_dir,
         "skip_preview": cfg.skip_preview,
         "mask_mode": cfg.mask_mode,
+        "action_mode": cfg.action_mode,
+        "advanced_expanded": cfg.advanced_expanded,
     }
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
