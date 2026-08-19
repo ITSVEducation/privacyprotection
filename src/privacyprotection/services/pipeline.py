@@ -319,10 +319,10 @@ class Pipeline:
                        ) -> tuple[int, list[str]]:
         """フォルダ内の本アプリ出力（*_masked / *_masked(N)）を一括復元する。
 
-        対応表はフォルダ共有の `_folder.pmap.csv` があればそれを使い、
-        なければファイルごとのサイドカー（restore_file の既定探索）に
-        委ねる。戻り値の警告リストにはファイル名・件数のみを載せ、
-        検出値やトークンの中身は含めない（不変条件）。
+        対応表はファイルごとのサイドカー（`<マスク済ファイル名>.pmap.csv`）が
+        あればそれを優先し、なければフォルダ共有の `_folder.pmap.csv` を
+        フォールバックとして使う。戻り値の警告リストにはファイル名・件数のみを
+        載せ、検出値やトークンの中身は含めない（不変条件）。
 
         ターゲット列挙は walk_masked() を通し、walk() と同じ境界条件を共有する
         （設計書 2.8: シンボリックリンク・ジャンクションは辿らず、隠し/システム
@@ -338,7 +338,17 @@ class Pipeline:
             if progress:
                 progress(i, total, path)
             try:
-                _, result = self.restore_file(path, mapping_path=mapping_path)
+                # 単体マスク（mask_file を masker=None で直接呼んだ場合）は
+                # そのファイル専用の Masker を使うため、トークンの採番は 1 から
+                # 独立にやり直される。したがって同じ「【人名_1】」でも、この
+                # ファイルのサイドカー対応表と、フォルダ共有の対応表とでは
+                # 指す実際の値が別人になり得る。サイドカーが存在するなら、
+                # 共有表より優先してそちらを使わないと、無警告のまま別人の
+                # 値を復元してしまう（restore_file の既定探索と同じ結論に
+                # 揃える）。
+                sidecar = path.parent / (path.name + ".pmap.csv")
+                _, result = self.restore_file(
+                    path, mapping_path=None if sidecar.exists() else mapping_path)
                 restored += 1
                 if result.unknown_tokens:
                     warnings.append(
