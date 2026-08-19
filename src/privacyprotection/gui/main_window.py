@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Callable
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
@@ -20,7 +21,10 @@ from PySide6.QtWidgets import (
 )
 
 from ..config import default_config_path, load_config, save_config
-from ..services.intent import FOLDER_MAPPING_NAME
+from ..services.intent import (
+    FOLDER_MAPPING_NAME, Intent, decide_file_intent, decide_folder_intent,
+    decide_text_intent, needs_confirmation,
+)
 from ..services.pipeline import Pipeline
 from ..services.report import BatchReport
 from .advanced_panel import AdvancedPanel
@@ -61,7 +65,7 @@ class MainWindow(QMainWindow):
         self.resize(560, 480)
         self._config = load_config()
         self._worker: MaskWorker | None = None
-        self._on_done = None
+        self._on_done: Callable[[object], None] | None = None
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -137,6 +141,17 @@ class MainWindow(QMainWindow):
             QMessageBox.Yes | QMessageBox.No,
         ) == QMessageBox.Yes
 
+    def _wants_restore(self, intent: Intent, action_mode: str, subject: str) -> bool:
+        """復元経路に進むか。判定規則そのものは services/intent.py が持ち、
+        ここはダイアログの提示だけを受け持つ。確認で「いいえ」を選んだ場合は
+        マスクにフォールバックする。
+        """
+        if intent is not Intent.RESTORE:
+            return False
+        if not needs_confirmation(intent, action_mode):
+            return True
+        return self._confirm_restore(subject)
+
     # --- 入力処理 -------------------------------------------------------
     def _handle_paths(self, paths: list[Path]):
         # --windowed ビルドでは stderr が存在せず、スロット内で送出された
@@ -152,16 +167,13 @@ class MainWindow(QMainWindow):
                 self, "エラー", f"{type(exc).__name__}: 処理できませんでした")
 
     def _dispatch_paths(self, paths: list[Path]):
-        from ..services.intent import (
-            Intent, decide_file_intent, decide_folder_intent)
         pipeline = self._build_pipeline()
         action_mode = self.advanced_panel.action_mode()
 
         if len(paths) == 1 and paths[0].is_dir():
             root = paths[0]
             intent = decide_folder_intent(root, action_mode)
-            if intent is Intent.RESTORE and (
-                    action_mode == "restore" or self._confirm_restore("フォルダ")):
+            if self._wants_restore(intent, action_mode, "フォルダ"):
                 self._run_worker(pipeline.restore_folder, root,
                                  on_done=self._on_folder_restored)
             else:
@@ -181,9 +193,7 @@ class MainWindow(QMainWindow):
                 fragments = pipeline.read_fragments(p)
                 intent = decide_file_intent(
                     p, [f.text for f in fragments], action_mode)
-                if intent is Intent.RESTORE and (
-                        action_mode == "restore"
-                        or self._confirm_restore("ファイル")):
+                if self._wants_restore(intent, action_mode, "ファイル"):
                     self._restore_one(pipeline, p)
                 else:
                     self._mask_one(pipeline, p, fragments)
@@ -241,16 +251,13 @@ class MainWindow(QMainWindow):
         # 例外を必ずダイアログとして表示する（_mask_clipboard には
         # 従来 try/except がなく、--windowed ビルドで無言死していた）。
         try:
-            from ..services.intent import Intent, decide_text_intent
             text = QGuiApplication.clipboard().text()
             if not text:
                 QMessageBox.information(self, "クリップボード", "テキストがありません")
                 return
             action_mode = self.advanced_panel.action_mode()
             intent = decide_text_intent(text, action_mode)
-            if intent is Intent.RESTORE and (
-                    action_mode == "restore"
-                    or self._confirm_restore("テキスト")):
+            if self._wants_restore(intent, action_mode, "テキスト"):
                 self._restore_clipboard()
             else:
                 self._mask_clipboard()
@@ -362,9 +369,20 @@ class MainWindow(QMainWindow):
         self.progress.setValue(i)
 
     def _on_finished(self, result):
-        self.progress.setVisible(False)
-        self._set_controls_enabled(True)
-        self._on_done(result)
+        # _handle_paths と同じ理由でこのスロット全体を保護する: _on_done
+        # (_on_folder_masked/_on_folder_restored) は batch.render_text() や
+        # ReportDialog の構築で例外を送出し得るが、ここはQtのシグナル
+        # ハンドラなので、包まずに漏らすと --windowed ビルドでは誰にも
+        # 見えないまま握りつぶされる。進捗バーを隠す・操作を再度有効化する
+        # 後始末は、_on_done が例外を投げたかどうかに関わらず必ず行う。
+        try:
+            self._on_done(result)
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "エラー", f"{type(exc).__name__}: 処理できませんでした")
+        finally:
+            self.progress.setVisible(False)
+            self._set_controls_enabled(True)
 
     def _on_folder_masked(self, result):
         batch, _ = result

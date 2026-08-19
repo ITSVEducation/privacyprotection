@@ -64,3 +64,13 @@ def decide_folder_intent(root: Path, action_mode: str = "auto") -> Intent:
     if (root / FOLDER_MAPPING_NAME).exists():
         return Intent.RESTORE
     return Intent.MASK
+
+
+def needs_confirmation(intent: Intent, action_mode: str = "auto") -> bool:
+    """復元と判定したときに確認ダイアログを挟むべきか。
+
+    自動判定で復元と出た場合は必ず確認する（誤判定の代償を「1回余計に
+    確認される」に留めるため）。動作が明示的に固定されている場合は
+    ユーザーの意思が既に表明されているので確認しない。
+    """
+    return intent is Intent.RESTORE and _forced(action_mode) is None

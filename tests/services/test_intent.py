@@ -2,7 +2,7 @@ from pathlib import Path
 
 from privacyprotection.services.intent import (
     FOLDER_MAPPING_NAME, Intent, decide_file_intent, decide_folder_intent,
-    decide_text_intent,
+    decide_text_intent, needs_confirmation,
 )
 
 
@@ -83,3 +83,28 @@ def test_folder_action_mode_overrides_auto(tmp_path):
     (tmp_path / FOLDER_MAPPING_NAME).write_text("", encoding="utf-8")
     assert decide_folder_intent(tmp_path, action_mode="mask") is Intent.MASK
     assert decide_folder_intent(tmp_path, action_mode="restore") is Intent.RESTORE
+
+
+# --- 確認ダイアログの要否 -------------------------------------------------
+# 「復元と判定したが、動作が明示的に固定されていなければ確認する」という
+# 決定ロジックそのもの（GUI側の _wants_restore はこの結果に従ってダイアログを
+# 出すだけ）。GUIにテストを持たない方針のため、このロジックはここに置く。
+
+def test_restore_auto_needs_confirmation():
+    assert needs_confirmation(Intent.RESTORE, "auto") is True
+
+
+def test_restore_forced_restore_skips_confirmation():
+    assert needs_confirmation(Intent.RESTORE, "restore") is False
+
+
+def test_restore_forced_mask_skips_confirmation():
+    assert needs_confirmation(Intent.RESTORE, "mask") is False
+
+
+def test_mask_auto_never_needs_confirmation():
+    assert needs_confirmation(Intent.MASK, "auto") is False
+
+
+def test_mask_forced_restore_never_needs_confirmation():
+    assert needs_confirmation(Intent.MASK, "restore") is False
