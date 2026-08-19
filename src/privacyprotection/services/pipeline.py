@@ -17,6 +17,7 @@ from ..core.patterns import PatternDetector
 from ..core.restorer import Restorer
 from ..handlers.folder_walker import MASKED_STEM_RE, MASKED_SUFFIX, walk
 from ..handlers.registry import get_handler
+from .intent import FOLDER_MAPPING_NAME
 from .report import BatchReport, FileReport
 
 # MASKED_SUFFIX/MASKED_STEM_RE は handlers/folder_walker.py で定義されている
@@ -253,7 +254,7 @@ class Pipeline:
 
         mapping_path: Path | None = None
         if self._mode == "token":
-            mapping_path = root / "_folder.pmap.csv"
+            mapping_path = root / FOLDER_MAPPING_NAME
             # フォルダ内のどのファイルも処理する前に、まず空の対応表を確定
             # させておく。こうすることで、1件目のマスク済み出力が書かれる
             # 前から常に対応表が存在し（対応表が空フォルダでも欠落しない）、
@@ -312,3 +313,36 @@ class Pipeline:
         _atomic_write(
             lambda p: handler.write_fragments(masked_path, p, fragments), out_path)
         return out_path, RestoreResult(text="", unknown_tokens=all_unknown)
+
+    def restore_folder(self, root: Path,
+                       progress: Callable[[int, int, Path], None] | None = None
+                       ) -> tuple[int, list[str]]:
+        """フォルダ内の本アプリ出力（*_masked / *_masked(N)）を一括復元する。
+
+        対応表はフォルダ共有の `_folder.pmap.csv` があればそれを使い、
+        なければファイルごとのサイドカー（restore_file の既定探索）に
+        委ねる。戻り値の警告リストにはファイル名・件数のみを載せ、
+        検出値やトークンの中身は含めない（不変条件）。
+        """
+        shared = root / FOLDER_MAPPING_NAME
+        mapping_path = shared if shared.exists() else None
+        targets = [p for p in sorted(root.rglob("*"))
+                   if p.is_file() and MASKED_STEM_RE.match(p.stem)
+                   and get_handler(p) is not None]
+        restored = 0
+        warnings: list[str] = []
+        total = len(targets)
+        for i, path in enumerate(targets, start=1):
+            if progress:
+                progress(i, total, path)
+            try:
+                _, result = self.restore_file(path, mapping_path=mapping_path)
+                restored += 1
+                if result.unknown_tokens:
+                    warnings.append(
+                        f"{path.name}: 未知トークン {len(result.unknown_tokens)} 件が"
+                        "そのまま残っています")
+            except Exception as exc:
+                warnings.append(
+                    f"{path.name}: {type(exc).__name__}: 処理できませんでした")
+        return restored, warnings

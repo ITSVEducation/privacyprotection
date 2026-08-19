@@ -618,3 +618,36 @@ def test_analyze_file_reuses_given_fragments(tmp_path):
     frags2, dets = pl.analyze_file(src, fragments=frags)
     assert frags2 is frags
     assert dets[0][0].category == "PERSON"
+
+
+def test_restore_folder_roundtrip(tmp_path):
+    (tmp_path / "a.txt").write_text("山田太郎です", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("佐藤花子さん", encoding="utf-8")
+    pl = make_pipeline()
+    pl.mask_folder(tmp_path)
+
+    restored, warnings = pl.restore_folder(tmp_path)
+    assert restored == 2
+    assert warnings == []
+    assert (tmp_path / "a_restored.txt").read_text(encoding="utf-8") == "山田太郎です"
+    assert (tmp_path / "b_restored.txt").read_text(encoding="utf-8") == "佐藤花子さん"
+
+
+def test_restore_folder_reports_failures_without_values(tmp_path):
+    # マスク済み命名だが対応表がどこにもない → 1件の警告（値は含まない）
+    (tmp_path / "orphan_masked.txt").write_text("【人名_9】", encoding="utf-8")
+    pl = make_pipeline()
+    restored, warnings = pl.restore_folder(tmp_path)
+    assert restored == 0
+    assert len(warnings) == 1
+    assert "orphan_masked.txt" in warnings[0]
+    assert "【人名_9】" not in warnings[0]
+
+
+def test_restore_folder_skips_non_masked_files(tmp_path):
+    (tmp_path / "plain.txt").write_text("平文", encoding="utf-8")
+    pl = make_pipeline()
+    restored, warnings = pl.restore_folder(tmp_path)
+    assert restored == 0
+    assert warnings == []
+    assert not (tmp_path / "plain_restored.txt").exists()
