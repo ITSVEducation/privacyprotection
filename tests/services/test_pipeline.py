@@ -651,3 +651,66 @@ def test_restore_folder_skips_non_masked_files(tmp_path):
     assert restored == 0
     assert warnings == []
     assert not (tmp_path / "plain_restored.txt").exists()
+
+
+def test_restore_folder_prefers_own_sidecar_over_shared_table(tmp_path):
+    """最終レビュー Critical Finding の回帰テスト。
+
+    フォルダ一括マスクは共有 Masker を使うが、後から同じフォルダで1ファイルだけ
+    個別にマスクすると、そのファイルは自分専用の Masker を使うためトークンの
+    採番が1からやり直される。したがって同じ「【人名_1】」であっても、
+    個別マスクのサイドカー対応表(<ファイル名>.pmap.csv)とフォルダ共有の
+    対応表(_folder.pmap.csv)とでは指している実在の値が別人になり得る。
+
+    restore_folder が共有表を優先してしまうと、この2ファイルを復元した結果が
+    警告なしに入れ替わり、どちらも共有表側の値になってしまう（実際に発生した
+    回帰）。サイドカーが存在する限り必ずそちらを優先しなければならない。
+    """
+    (tmp_path / "b.txt").write_text("佐藤花子です", encoding="utf-8")
+    pl = make_pipeline()
+    pl.mask_folder(tmp_path)  # 共有 Masker: b_masked.txt の【人名_1】=佐藤花子
+
+    (tmp_path / "a.txt").write_text("山田太郎です", encoding="utf-8")
+    frags, dets = pl.analyze_file(tmp_path / "a.txt")
+    # 個別マスク（専用 Masker）。採番は1からやり直され、a_masked.txt の
+    # 【人名_1】は山田太郎を指す（共有表の【人名_1】=佐藤花子とは別人）。
+    pl.mask_file(tmp_path / "a.txt", frags, dets)
+    assert (tmp_path / "a_masked.txt.pmap.csv").exists()
+
+    restored, warnings = pl.restore_folder(tmp_path)
+
+    assert restored == 2
+    assert warnings == []
+    a_text = (tmp_path / "a_restored.txt").read_text(encoding="utf-8")
+    b_text = (tmp_path / "b_restored.txt").read_text(encoding="utf-8")
+    # 単に「異なる」だけでなく、それぞれが自分の元の値と一致することを検証する。
+    assert a_text == "山田太郎です"
+    assert b_text == "佐藤花子です"
+    assert a_text != b_text
+
+
+def test_restore_folder_warns_on_unknown_token_without_leaking_value(tmp_path):
+    """restore_folder の `if result.unknown_tokens:` 分岐（未知トークン警告）の
+    回帰テスト。この分岐は例外パスと異なりこれまで未検証だった。
+
+    復元自体は継続しつつ、対応表に載っていないトークン（AIの回答で改変
+    された、または手で書き足された等）が残っている場合に警告が1件出ること、
+    警告にファイル名と件数が含まれること、トークンの中身そのものは
+    含まれないこと（不変条件）を確認する。
+    """
+    (tmp_path / "a.txt").write_text("山田太郎です", encoding="utf-8")
+    pl = make_pipeline()
+    pl.mask_folder(tmp_path)
+
+    masked_path = tmp_path / "a_masked.txt"
+    # 対応表に存在しないトークンを追記する（AI側で改変された状態を模す）。
+    masked_path.write_text(
+        masked_path.read_text(encoding="utf-8") + "【人名_9】", encoding="utf-8")
+
+    restored, warnings = pl.restore_folder(tmp_path)
+
+    assert restored == 1  # 未知トークンが残っていても復元処理自体は続行する
+    assert len(warnings) == 1
+    assert "a_masked.txt" in warnings[0]
+    assert "1" in warnings[0]  # 未知トークンの件数
+    assert "【人名_9】" not in warnings[0]  # トークンの中身は載せない（不変条件）
