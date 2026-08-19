@@ -9,7 +9,7 @@
 
 ---
 
-## 3. 技術選定
+## 2.1 技術選定
 
 | 項目 | 選定 | 理由 |
 |------|------|------|
@@ -22,14 +22,15 @@
 | パッケージング | PyInstaller | Windows単体配布 |
 | テスト | pytest | コア層のユニットテスト |
 
-> **重要な依存バージョン制約**: `spacy` は `>=3.4.4,<3.8.0` に固定する。spacy 3.8以降は
-> ja_ginza の `compound_splitter` パイプラインを壊し、ja_ginza 側に修正版が無い。NLP依存を
-> 触る場合は、変更後に `spacy.load("ja_ginza")` が実際に固有表現（`doc.ents`）を返すことを
-> 必ず再確認すること。
+> **依存バージョン制約**: `spacy>=3.4.4,<3.8.0` と `numpy<2` は**どちらの上限も必須**で、片方でも
+> 外すとGiNZAのNERが沈黙し、マスクが何も検出しなくなる。`click` は spacy が依存宣言なしに実行時
+> importするためピンしている。理由の詳細は `pyproject.toml` のコメントと
+> [`AGENTS.md`](../AGENTS.md) にある。NLP依存を触る場合は、変更後に `spacy.load("ja_ginza")` が
+> 実際に固有表現（`doc.ents`）を返すことを必ず再確認すること。
 
 ---
 
-## 4. アーキテクチャ
+## 2.2 レイヤ構成
 
 3層構成とし、**コア層はGUIに一切依存しない**。依存の向きは GUI → サービス → コア＋Handler の一方向で、
 コア層とHandler層は互いを直接importしない。この分離により、コア層はGUIなしで完全にユニットテストできる。
@@ -43,7 +44,8 @@
 ├─────────────────────────────────────────┤
 │  サービス層 (services/)                     │
 │  Pipeline: Handler＋コアを束ね、ファイル/       │
-│  フォルダ単位のマスク・復元を統括。レポート生成    │
+│  フォルダ/生テキスト単位のマスク・復元を統括。   │
+│  レポート生成                               │
 ├─────────────────────────────────────────┤
 │  コア層 (純Python・GUI非依存)               │
 │  ・Detector: 検出エンジン                   │
@@ -52,15 +54,19 @@
 │    - NerDetector（GiNZA）                  │
 │  ・Masker: 置換エンジン（可逆／不可逆）       │
 │  ・Restorer: 復元エンジン（対応表→逆置換）    │
+│  ・spans: 区間ユーティリティ（純粋関数）      │
 ├─────────────────────────────────────────┤
 │  ファイルI/O層 (Handler共通インターフェース)   │
 │  TextHandler / XlsxHandler / DocxHandler / │
-│  PptxHandler / ClipboardHandler /          │
-│  FolderWalker（再帰一括処理）               │
+│  PptxHandler / FolderWalker（再帰一括処理）  │
 └─────────────────────────────────────────┘
 ```
 
-### 4.1 コア層の主要インターフェース
+GUIが検出器を組み立てたり生テキストを検出したりする必要がある場面（クリップボード経路）では、
+GUIが `core/` を直接importするのではなく、サービス層が `Pipeline.from_config()` /
+`Pipeline.analyze_text()` / `Pipeline.mask_text()` を公開APIとして提供して境界を保つ。
+
+## 2.3 コア層の主要インターフェース
 
 ```python
 @dataclass
@@ -69,26 +75,32 @@ class Detection:
     category: str      # 種別（PERSON / ORG / LOC / PHONE / EMAIL / ADDRESS / CUSTOM 等）
     start: int         # テキスト断片内の開始位置
     end: int           # 終了位置
-    source: str        # 検出元（pattern / dictionary / ner）
+    source: str        # 検出元（pattern / dictionary / ner / manual）
     enabled: bool      # プレビューでの採否（既定 True）
 
 class Detector:
     def detect(self, text: str) -> list[Detection]: ...
 
-class Masker:
-    def mask(self, fragments: list[str], detections: list[list[Detection]],
-             mode: Literal["token", "redact"]) -> tuple[list[str], MappingTable]: ...
+class Masker:                        # mode は "token" / "redact"
+    def scan_existing_tokens(self, fragments: list[str]) -> int: ...
+    def mask_fragments(self, fragments: list[str],
+                       detections: list[list[Detection]]
+                       ) -> tuple[list[str], MappingTable]: ...
 
-class Restorer:
-    def restore(self, text: str, mapping: MappingTable) -> RestoreResult: ...
+class Restorer:                      # 対応表を受け取って構築する
+    def restore(self, text: str) -> RestoreResult: ...
     # RestoreResult = 復元後テキスト + 未知トークン一覧（警告表示用）
 ```
 
-> `Detection.text` は常に `original_text[start:end]` と完全一致していなければならない。この不変条件は
-> 実際にバグ（範囲トリム後にスライスと `.group()` が食い違う）を生んでおり、範囲計算を触るときは
-> テストで明示的に検証すること。
+`core/spans.py` は検出器・マスカーに依存しない文字列区間の純粋関数を持つ。`remaining_spans()` /
+`resolve_overlaps()` が重複解決（[03 §3.1](03-masking-spec.md)）の唯一の実装で、`patterns.py` と
+`detector.py` の両方から使われる。`find_occurrences()` はある値の完全一致・非重複の全出現を返し、
+プレビューの「同じ語をまとめて扱う」（[04 §4.2](04-ui-and-operations.md)）が使う。
 
-### 4.5 ファイルI/O層の共通インターフェース
+> `Detection.text` は常に `original_text[start:end]` と完全一致していなければならない。範囲計算を
+> 触るときはテストで明示的に検証すること。根拠と検証手順は `.claude/rules/core-invariants.md` にある。
+
+## 2.4 ファイルI/O層の共通インターフェース
 
 ```python
 class FileHandler(ABC):
@@ -103,38 +115,35 @@ class FileHandler(ABC):
 **新しい拡張子への対応は Handler を1クラス追加するだけで完結させる**（`registry.py` に登録するだけで
 サービス層から自動的に使われる）。各Handlerは「PIIを探す価値のある断片だけ」を抽出し、書き戻し時は
 その断片のテキストだけを差し替え、書式・数式・無関係なセルには一切触れない。
-各形式が具体的にどこを対象とするかは[03 マスク仕様「各形式のマスク対象範囲」](03-masking-spec.md)を参照。
+各形式が具体的にどこを対象とするかは[03 §3.6 各形式のマスク対象範囲](03-masking-spec.md)を参照。
 
 ---
 
-## 5. データフロー
-
-### 5.1 マスク時
+## 2.5 データフロー（マスク時）
 
 1. ユーザーがファイル／フォルダをドロップ、またはクリップボード読込
-2. Handler がテキスト断片（Fragment）を抽出
+2. Handler がテキスト断片（Fragment）を抽出（クリップボードは全体を1断片として扱う）
 3. Detector が検出リストを作成（重複解決済み）
 4. プレビュー画面で原文ハイライト表示 → ユーザーが除外／手動追加（「確認なし」時はスキップ）
 5. Masker が置換実行
 6. 出力: `<元名>_masked.<拡張子>` ＋（可逆時）`.pmap.csv`。元ファイルは変更しない
-7. **処理後レポートを表示**（→ [04](04-ui-and-operations.md)）
+7. **処理後レポートを表示**（→ [04 §4.4](04-ui-and-operations.md)）
 
-### 5.2 復元時
+## 2.6 データフロー（復元時）
 
 1. 復元対象を指定: マスク済ファイル、または AI回答を貼り付けたテキスト／クリップボード
 2. 対応する `.pmap.csv` を指定（同フォルダにあれば自動検出）
 3. Restorer がトークンを完全一致で逆置換。対応表にないトークン・置換されず残ったトークンは警告一覧に表示
 
-### 5.3 出力の原子性（クラッシュ・キャンセル対策）
+## 2.7 出力の原子性（クラッシュ・中断対策）
 
 - マスク済ファイル・対応表は**一時ファイルに書き込み完了後、リネームで確定**する（部分書き込みされた出力を残さない）
 - 対応表はマスク済ファイルより**先に**確定する（マスク済ファイルだけ存在して復元不能になる状態を作らない）
-- キャンセル・クラッシュ時は一時ファイルを削除。処理済みの完成ペア（マスク済＋対応表）は残す
-- フォルダ一括のキャンセル時は、完了済みファイル一覧をレポートに表示
+- 中断時は一時ファイルを削除する。処理済みの完成ペア（マスク済＋対応表）は残す
 - フォルダ一括処理では、各ファイルのマスク済出力を書く前に、蓄積済みの共有対応表を毎回書き直す
   （途中でクラッシュしても、出力済みファイルのトークンが必ず対応表に記録されている状態を保つ）
 
-### 5.4 フォルダ再帰処理の境界条件
+## 2.8 フォルダ再帰処理の境界条件
 
 - シンボリックリンク・ジャンクション（NTFS junction）は**辿らない**（無限ループ防止）
 - 隠しファイル・システムファイル・`~$` で始まるOfficeロックファイルはスキップ（Windowsのファイル属性で判定）

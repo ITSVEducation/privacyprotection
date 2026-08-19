@@ -1,11 +1,10 @@
-# 個人情報マスキングアプリ ドキュメント
+# 個人情報マスキングアプリ 設計書
 
 社内でAIサービスにテキストやファイルを渡す前に、個人情報・機密情報を自動でマスク（隠す）し、
-AIの回答受領後に元へ復元できる、**完全ローカルで動作するWindowsデスクトップアプリ**の仕様書です。
+AIの回答受領後に元へ復元できる、**完全ローカルで動作するWindowsデスクトップアプリ**の設計書。
 
-- ステータス: 実装完了（全20タスク完了、マージ準備済み）
-- 種別: 実装反映済み仕様書（as-built）
-- 最終更新: 2026-07-24
+ソースコードは `src/privacyprotection/`、開発コマンドと保守上の注意点は
+[`AGENTS.md`](../AGENTS.md)、利用者向けの説明は[ルートの README](../README.md) にある。
 
 ---
 
@@ -19,8 +18,8 @@ AIの回答受領後に元へ復元できる、**完全ローカルで動作す�
 | [04-ui-and-operations.md](04-ui-and-operations.md)               | 画面構成・処理後レポート・エラー処理・テスト方針・配布               | 画面の挙動、運用、テスト、ビルド方法を知りたい               |
 | [05-known-issues-and-roadmap.md](05-known-issues-and-roadmap.md) | **現状の課題・既知の制約**・将来拡張                                 | 「今何が未対応か」「触るとき何に注意すべきか」を知りたい     |
 
-> 実際のソースコードは別ブランチ（`pii-masking-app`）のワークツリーにあります。実装の進行履歴は
-> `docs/superpowers/plans/` の実装プランと git ログを参照してください。
+節番号は文書番号と対応する（`02-architecture.md` の節は §2.x、`03-masking-spec.md` の節は §3.x）。
+`05-known-issues-and-roadmap.md` だけは A-1・C-2 のような課題IDで参照する。
 
 ---
 
@@ -29,14 +28,8 @@ AIの回答受領後に元へ復元できる、**完全ローカルで動作す�
 - **これから初めて触る** → [01-overview.md](01-overview.md) → [02-architecture.md](02-architecture.md)
 - **検出・マスクの仕様を直したい／確認したい** → [03-masking-spec.md](03-masking-spec.md)
 - **バグ・未対応挙動に当たった** → [05-known-issues-and-roadmap.md](05-known-issues-and-roadmap.md) を先に確認（既知の制約かもしれません）
-- **新しいファイル形式に対応したい** → [02-architecture.md](02-architecture.md) の「ファイルI/O層」
-- **ビルド・配布する** → [04-ui-and-operations.md](04-ui-and-operations.md) の「配布・実行環境の保証」
-
----
-
-## 開発環境資材の確認
-
-- `uv run python -m privacyprotection.gui.app`
+- **新しいファイル形式に対応したい** → [02-architecture.md §2.4](02-architecture.md)
+- **ビルド・配布する** → [04-ui-and-operations.md §4.7](04-ui-and-operations.md)
 
 ## 用語集
 
@@ -57,5 +50,5 @@ AIの回答受領後に元へ復元できる、**完全ローカルで動作す�
 | **Handler**             | ファイル形式ごとの入出力担当クラス（TextHandler / XlsxHandler など）。共通ABCを実装する。          |
 | **NER**                 | Named Entity Recognition（固有表現抽出）。辞書未登録の人名・組織名・地名を機械学習で検出する。     |
 | **GiNZA**               | 完全オフラインで動作する日本語NERライブラリ（spaCy + ja_ginza）。本アプリのNER基盤。               |
-| **重複解決**            | 複数の検出器が重なる範囲を検出したときに一意に絞り込むルール。詳細は[03](03-masking-spec.md)参照。 |
+| **重複解決**            | 複数の検出器が重なる範囲を検出したときに一意に絞り込むルール。詳細は[03 §3.1](03-masking-spec.md)参照。 |
 | **脅威モデル**          | 「何から守り、何は守らないか」の前提。本アプリは「PIIがクラウドAIに渡ること」を防ぐ。              |
