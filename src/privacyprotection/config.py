@@ -59,6 +59,17 @@ def save_config(cfg: AppConfig, path: Path | None = None) -> None:
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def merge_new_dictionary_entries(
+        existing: dict[str, str], new: dict[str, str]) -> dict[str, str]:
+    """`existing` に無い語句だけを `new` から抜き出して返す（既存優先）。
+
+    プレビューで手動追加した検出のカスタム辞書への自動登録に使う。既存
+    エントリを上書きすると、ユーザーが設定画面で意図して割り当てた種別が
+    ドラッグ追加の既定カテゴリ（CUSTOM）で黙って塗り替わるため、追加のみ。
+    """
+    return {w: c for w, c in new.items() if w not in existing}
+
+
 def import_dictionary_csv(path: Path) -> tuple[dict[str, str], list[str]]:
     result: dict[str, str] = {}
     warnings: list[str] = []

@@ -45,3 +45,21 @@ def test_new_ui_fields_default_when_missing(tmp_path):
     loaded = load_config(p)
     assert loaded.action_mode == "auto"
     assert loaded.advanced_expanded is False
+
+
+def test_merge_new_dictionary_entries_adds_only_new_words():
+    from privacyprotection.config import merge_new_dictionary_entries
+    existing = {"山田商事": "ORG"}
+    new = {"山田商事": "CUSTOM", "プロジェクトX": "CUSTOM"}
+    added = merge_new_dictionary_entries(existing, new)
+    # 既存語句は上書きしない（既存優先）。新規語句だけが返る。
+    assert added == {"プロジェクトX": "CUSTOM"}
+    # 引数の existing 自体は変更しない
+    assert existing == {"山田商事": "ORG"}
+
+
+def test_merge_new_dictionary_entries_empty_cases():
+    from privacyprotection.config import merge_new_dictionary_entries
+    assert merge_new_dictionary_entries({}, {"a": "CUSTOM"}) == {"a": "CUSTOM"}
+    assert merge_new_dictionary_entries({"a": "CUSTOM"}, {}) == {}
+    assert merge_new_dictionary_entries({}, {}) == {}
