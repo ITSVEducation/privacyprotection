@@ -51,7 +51,8 @@
 │  ・Detector: 検出エンジン                   │
 │    - PatternDetector（正規表現）            │
 │    - DictionaryDetector（カスタム辞書）      │
-│    - NerDetector（GiNZA）                  │
+│    - NerDetector（GiNZA、モデルはプロセス内 │
+│      で1回だけロードし全インスタンスで共有）  │
 │  ・Masker: 置換エンジン（可逆／不可逆）       │
 │  ・Restorer: 復元エンジン（対応表→逆置換）    │
 │  ・spans: 区間ユーティリティ（純粋関数）      │
