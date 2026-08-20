@@ -20,7 +20,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout, QWidget,
 )
 
-from ..config import default_config_path, load_config, save_config
+from ..config import (
+    default_config_path, load_config, merge_new_dictionary_entries,
+    save_config,
+)
 from ..services.intent import (
     FOLDER_MAPPING_NAME, Intent, decide_file_intent, decide_folder_intent,
     decide_text_intent, needs_confirmation,
@@ -209,8 +212,22 @@ class MainWindow(QMainWindow):
             dlg = PreviewDialog(frags, dets, parent=self)
             if dlg.exec() != PreviewDialog.Accepted:
                 return
+            self._register_manual_entries(dlg.accepted_manual_entries())
         _, report = pipeline.mask_file(p, frags, dets)
         self._show_report_text(self._single_report(report))
+
+    def _register_manual_entries(self, entries: dict[str, str]) -> None:
+        """プレビューで手動追加された語句をカスタム辞書へ自動登録する。
+
+        既存語句は上書きしない（設定画面で意図して割り当てた種別を守る）。
+        通知はしない: 登録内容は設定画面のカスタム辞書タブでいつでも確認・
+        削除できる。closeEvent 任せにせず即保存する（異常終了でも残るように）。
+        """
+        added = merge_new_dictionary_entries(
+            self._config.custom_dictionary, entries)
+        if added:
+            self._config.custom_dictionary.update(added)
+            save_config(self._config)
 
     def _restore_one(self, pipeline: Pipeline, p: Path) -> None:
         try:
@@ -284,6 +301,7 @@ class MainWindow(QMainWindow):
                 return  # キャンセル時はクリップボードを変更しない
             # PreviewDialog は [dets] を in-place 編集するため、確定後の dets が
             # そのまま編集結果（追加/無効化/カテゴリ変更を反映）になっている。
+            self._register_manual_entries(dlg.accepted_manual_entries())
 
         pmap = default_config_path().parent / "clipboard.pmap.csv"
         pmap.parent.mkdir(parents=True, exist_ok=True)
