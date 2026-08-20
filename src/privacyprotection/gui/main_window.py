@@ -69,6 +69,10 @@ class MainWindow(QMainWindow):
         self._config = load_config()
         self._worker: MaskWorker | None = None
         self._on_done: Callable[[object], None] | None = None
+        # 単一ファイルのマスクは解析（NER）だけをワーカーに逃がし、
+        # プレビューがモーダルなので1件ずつ順に処理する（設計書 04 §4.1）。
+        self._mask_queue: list[tuple[Path, list]] = []
+        self._queue_pipeline: Pipeline | None = None
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -84,6 +88,11 @@ class MainWindow(QMainWindow):
         self.advanced_panel.settings_requested.connect(self._open_settings)
         self.advanced_panel.dictionary_requested.connect(self._open_dictionary)
         layout.addWidget(self.advanced_panel)
+
+        # 解析・処理中の状態表示（検出値は載せない: ファイル名・件数のみ）
+        self.status_label = QLabel("")
+        self.status_label.setVisible(False)
+        layout.addWidget(self.status_label)
 
         self.progress = QProgressBar()
         self.progress.setVisible(False)
@@ -178,20 +187,24 @@ class MainWindow(QMainWindow):
             intent = decide_folder_intent(root, action_mode)
             if self._wants_restore(intent, action_mode, "フォルダ"):
                 self._run_worker(pipeline.restore_folder, root,
-                                 on_done=self._on_folder_restored)
+                                 on_done=self._on_folder_restored,
+                                 busy_message="フォルダを復元中…")
             else:
                 self._run_worker(pipeline.mask_folder, root,
-                                 on_done=self._on_folder_masked)
+                                 on_done=self._on_folder_masked,
+                                 busy_message="フォルダを解析中…")
             return
 
+        # 未対応拡張子・単一ファイルモードへのフォルダ混在ドロップ・
+        # ハンドラの読み書きエラー・read_mapping の重複トークン検出など、
+        # あらゆる失敗を1ファイルごとに捕え、1件の失敗で残りの処理まで
+        # 巻き込んで落ちないよう、ファイル単位のダイアログに留める。
+        # マスク・復元の両経路がこの単一の except ブロックを共有する
+        # （Finding 4）。mask_folder の per-file except ブロックと同じ
+        # 一般的なメッセージ形式に揃える。
+        # 断片読み込み・意図判定・復元は従来どおり同期（NERを使わず高速）。
+        # 遅い解析（NER）だけをワーカーに逃がすため、マスク対象はキューに積む。
         for p in paths:
-            # 未対応拡張子・単一ファイルモードへのフォルダ混在ドロップ・
-            # ハンドラの読み書きエラー・read_mapping の重複トークン検出など、
-            # あらゆる失敗を1ファイルごとに捕え、1件の失敗で残りの処理まで
-            # 巻き込んで落ちないよう、ファイル単位のダイアログに留める。
-            # マスク・復元の両経路がこの単一の except ブロックを共有する
-            # （Finding 4）。mask_folder の per-file except ブロックと同じ
-            # 一般的なメッセージ形式に揃える。
             try:
                 fragments = pipeline.read_fragments(p)
                 intent = decide_file_intent(
@@ -199,14 +212,42 @@ class MainWindow(QMainWindow):
                 if self._wants_restore(intent, action_mode, "ファイル"):
                     self._restore_one(pipeline, p)
                 else:
-                    self._mask_one(pipeline, p, fragments)
+                    self._mask_queue.append((p, fragments))
             except Exception as exc:
                 QMessageBox.warning(
                     self, "エラー",
                     f"{p.name}: {type(exc).__name__}: 処理できませんでした")
+        if self._mask_queue:
+            self._queue_pipeline = pipeline
+            self._mask_next()
 
-    def _mask_one(self, pipeline: Pipeline, p: Path, fragments):
-        frags, dets = pipeline.analyze_file(p, fragments=fragments)
+    def _mask_next(self):
+        """キューの先頭ファイルの解析をワーカーで開始する。空なら終了。"""
+        if not self._mask_queue:
+            self._queue_pipeline = None
+            return
+        p, fragments = self._mask_queue.pop(0)
+        self._run_worker(
+            self._queue_pipeline.analyze_file, p, fragments,
+            on_done=lambda result, p=p: self._on_file_analyzed(p, result),
+            busy_message=f"解析中… {p.name}")
+
+    def _on_file_analyzed(self, p: Path, result):
+        # 従来 _dispatch_paths のループが担っていた「1件の失敗で残りを
+        # 巻き込まない」を、非同期化後はここで担う（メッセージ形式も同じ）。
+        try:
+            frags, dets = result
+            self._finish_mask_one(self._queue_pipeline, p, frags, dets)
+        except Exception as exc:
+            QMessageBox.warning(
+                self, "エラー",
+                f"{p.name}: {type(exc).__name__}: 処理できませんでした")
+        finally:
+            self._mask_next()
+
+    def _finish_mask_one(self, pipeline: Pipeline, p: Path, frags, dets):
+        """解析済みファイルのプレビュー確認とマスク書き出し（GUIスレッド）。
+        mask_file は検出済みリストを使うためNERを再実行せず高速。"""
         if not self.advanced_panel.skip_preview():
             from .preview_dialog import PreviewDialog
             dlg = PreviewDialog(frags, dets, parent=self)
@@ -289,11 +330,20 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "クリップボード", "テキストがありません")
             return
         pipeline = self._build_pipeline()
+        # 解析（NER）は遅いのでワーカーで実行し、完了後にプレビューへ。
+        # 例外は MaskWorker.failed → _on_failed 経由で必ずダイアログになる
+        # （従来 _clipboard_action の try/except が担っていた役割）。
+        self._run_worker(
+            pipeline.analyze_text, text,
+            on_done=lambda result: self._on_clipboard_analyzed(
+                pipeline, text, result),
+            busy_message="解析中… クリップボード")
 
+    def _on_clipboard_analyzed(self, pipeline: Pipeline, text: str, result):
         # クリップボードもファイルと同じく、検出結果をプレビューで確認・編集
         # してから確定する（「確認なしで即変換」ONのときはスキップ）。
         # AIへ貼り付ける直前の最終ゲートなので、目視確認できることが望ましい。
-        frag, dets = pipeline.analyze_text(text)
+        frag, dets = result
         if not self.advanced_panel.skip_preview():
             from .preview_dialog import PreviewDialog
             dlg = PreviewDialog([frag], [dets], parent=self)
@@ -307,7 +357,7 @@ class MainWindow(QMainWindow):
         pmap.parent.mkdir(parents=True, exist_ok=True)
         masked, table, count = pipeline.mask_text(
             text, mapping_path=pmap, detections=dets)
-        cb.setText(masked)
+        QGuiApplication.clipboard().setText(masked)
         if count == 0:
             # 検出0件の理由は「トークンモードで対応表が空」ではなく
             # detector自体が何も検出しなかったこと。redactモードでは
@@ -357,22 +407,41 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "復元完了", "クリップボードを復元しました。")
 
     # --- ワーカー実行 ----------------------------------------------------
-    def _run_worker(self, fn, *args, on_done):
+    def _run_worker(self, fn, *args, on_done, busy_message: str):
         # 前回のワーカーがまだ実行中のまま self._worker を差し替えると、
-        # 生きているQThreadへの参照を黙って失う（Finding 5）。新規実行を
-        # 拒否し、ユーザーに完了を待つよう伝える。
+        # 生きているQThreadへの参照を黙って失う（Finding 5）。キュー連鎖では
+        # finished_ok 発火時点で run() は完了しているがスレッド終了処理が
+        # わずかに残ることがあるため、まず短時間 wait して確定させる。
+        # それでも実行中なら本当に処理中なので新規実行を拒否する。
         if self._worker is not None and self._worker.isRunning():
-            QMessageBox.information(
-                self, "処理中", "前の処理が完了するまでお待ちください")
-            return
-        self.progress.setVisible(True)
-        self._set_controls_enabled(False)
+            if not self._worker.wait(100):
+                QMessageBox.information(
+                    self, "処理中", "前の処理が完了するまでお待ちください")
+                return
+        self._begin_busy(busy_message)
         self._on_done = on_done
         self._worker = MaskWorker(fn, *args)
         self._worker.progress.connect(self._on_progress)
         self._worker.finished_ok.connect(self._on_finished)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
+
+    def _begin_busy(self, message: str) -> None:
+        """ワーカー実行中の表示。進捗総数が不明な間は不確定モード
+        （バーが流れるアニメーション）で「実行中」であることだけを示す。
+        フォルダ一括処理は progress シグナル受信時（_on_progress）に
+        確定モードへ切り替わる。"""
+        self.status_label.setText(message)
+        self.status_label.setVisible(True)
+        self.progress.setRange(0, 0)  # 不確定モード
+        self.progress.setVisible(True)
+        self._set_controls_enabled(False)
+
+    def _end_busy(self) -> None:
+        self.progress.setVisible(False)
+        self.progress.setRange(0, 1)  # 不確定モードを解除して次回に備える
+        self.status_label.setVisible(False)
+        self._set_controls_enabled(True)
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         """ワーカー実行中は、新たな実行の引き金になりうる操作を止める
@@ -383,24 +452,26 @@ class MainWindow(QMainWindow):
         self._paste_shortcut.setEnabled(enabled)
 
     def _on_progress(self, i, total, name):
-        self.progress.setMaximum(total)
+        self.progress.setRange(0, total)
         self.progress.setValue(i)
+        self.status_label.setText(f"処理中: {name} ({i}/{total})")
 
     def _on_finished(self, result):
+        # 先に busy を解除する: _on_done はプレビュー（モーダル）を開いたり、
+        # キューの次のワーカーを起動して再度 _begin_busy したりするため、
+        # 従来のように finally で後から解除すると次の実行中に操作が
+        # 有効化されてしまう。
         # _handle_paths と同じ理由でこのスロット全体を保護する: _on_done
         # (_on_folder_masked/_on_folder_restored) は batch.render_text() や
         # ReportDialog の構築で例外を送出し得るが、ここはQtのシグナル
         # ハンドラなので、包まずに漏らすと --windowed ビルドでは誰にも
-        # 見えないまま握りつぶされる。進捗バーを隠す・操作を再度有効化する
-        # 後始末は、_on_done が例外を投げたかどうかに関わらず必ず行う。
+        # 見えないまま握りつぶされる。
+        self._end_busy()
         try:
             self._on_done(result)
         except Exception as exc:
             QMessageBox.critical(
                 self, "エラー", f"{type(exc).__name__}: 処理できませんでした")
-        finally:
-            self.progress.setVisible(False)
-            self._set_controls_enabled(True)
 
     def _on_folder_masked(self, result):
         batch, _ = result
@@ -414,9 +485,9 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "復元完了", msg)
 
     def _on_failed(self, message):
-        self.progress.setVisible(False)
-        self._set_controls_enabled(True)
+        self._end_busy()
         QMessageBox.critical(self, "エラー", message)
+        self._mask_next()  # 単一ファイルキューの途中失敗でも残りを続行する
 
     def _show_report_text(self, report_text: str):
         from .report_dialog import ReportDialog
