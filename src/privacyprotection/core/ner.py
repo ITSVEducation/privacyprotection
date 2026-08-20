@@ -1,5 +1,7 @@
-"""GiNZAによる固有表現抽出。モデルは遅延ロード（起動高速化）。"""
+"""GiNZAによる固有表現抽出。モデルは遅延ロードし、プロセス内で共有する。"""
 from __future__ import annotations
+
+import threading
 
 from .models import Detection
 
@@ -21,20 +23,29 @@ _LABEL_MAP = {
 }
 
 
+# Pipeline は実行のたびに新しい NerDetector を組み立てる（Pipeline.from_config）
+# ため、モデルをインスタンス保持にすると毎回 spacy.load（数秒〜十数秒）が走る。
+# プロセス内で1回だけロードして全インスタンスで共有する。ロックは GUI スレッド
+# とワーカースレッドからの同時初回呼び出しによる二重ロード防止。
+_NLP = None
+_NLP_LOCK = threading.Lock()
+
+
+def _load_model():
+    global _NLP
+    if _NLP is None:
+        with _NLP_LOCK:
+            if _NLP is None:
+                import spacy
+                _NLP = spacy.load("ja_ginza")
+    return _NLP
+
+
 class NerDetector:
-    def __init__(self):
-        self._nlp = None
-
-    def _load(self):
-        if self._nlp is None:
-            import spacy
-            self._nlp = spacy.load("ja_ginza")
-        return self._nlp
-
     def detect(self, text: str) -> list[Detection]:
         if not text.strip():
             return []
-        doc = self._load()(text)
+        doc = _load_model()(text)
         results: list[Detection] = []
         for ent in doc.ents:
             category = _LABEL_MAP.get(ent.label_)
