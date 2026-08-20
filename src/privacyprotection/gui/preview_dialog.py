@@ -46,6 +46,24 @@ _DRAG_ADD_CATEGORY = "CUSTOM"
 # 規則に揃える（どれを選んでも復元時の代表カテゴリと一致する一貫性が保てる）。
 
 
+def collect_manual_entries(
+        detections: list[list[Detection]]) -> dict[str, str]:
+    """有効な手動追加検出から辞書登録用の {語句: カテゴリ} を組み立てる。
+
+    マスク実行確定時にカスタム辞書へ自動登録する対象の選別（設計書 §4.2）。
+    対象は enabled かつ source == "manual" のみ。自動検出（pattern/ner/
+    dictionary）を含めると、一度でも検出された語がすべて辞書に固定されて
+    しまい、カテゴリOFFで検出を止める手段が効かなくなるため含めない。
+    同じ語句が複数あれば最初に現れたものが勝つ。
+    """
+    entries: dict[str, str] = {}
+    for dets in detections:
+        for d in dets:
+            if d.enabled and d.source == "manual":
+                entries.setdefault(d.text, d.category)
+    return entries
+
+
 def build_display_map(text: str) -> tuple[str, list[int], list[int]]:
     """断片テキストを QTextEdit 表示用に正規化し、位置の相互変換表を返す。
 
@@ -429,3 +447,8 @@ class PreviewDialog(QDialog):
         for fi, frag in enumerate(self.fragments):
             for start, end in find_occurrences(frag.text, value):
                 self._add_one(fi, value, start, end, category)
+
+    def accepted_manual_entries(self) -> dict[str, str]:
+        """有効な手動追加検出の {語句: カテゴリ}。呼び出し元が Accepted 後に
+        カスタム辞書へ登録するために使う（永続化はダイアログの責務外）。"""
+        return collect_manual_entries(self.detections)
